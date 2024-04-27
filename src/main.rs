@@ -1,289 +1,93 @@
-use drm::buffer::DrmFourcc;
-use drm::control;
-use drm::control::atomic;
-use drm::control::connector;
-use drm::control::crtc;
-use drm::control::property;
-use drm::control::AtomicCommitFlags;
-use drm::control::Device as ControlDevice;
-use drm::control::PageFlipFlags;
-use drm::Device;
+use std::io::{self, Write};
+use std::time::Instant;
 
-use std::os::unix::io::AsFd;
-use std::os::unix::io::BorrowedFd;
+use hal::Surface;
 
-pub struct Card(std::fs::File);
+mod hal;
 
-impl AsFd for Card {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.0.as_fd()
+fn hsl_to_rgb(h: u8, s: u8, v: u8) -> (u8, u8, u8) {
+    // Based on https://rasmithuk.org.uk/entry/fixed-hsv-rgb.
+    const DIV_INTO_6: u16 = 0x0600;
+    let c = ((s as u32 * v as u32) >> 8) as u16;
+    let t = (h as u32 + 1) * DIV_INTO_6 as u32;
+    let fiddle = (t & 0x00010000) != 0;
+
+    let t = if fiddle {
+        0x00020000 - (t & 0x0001ffff)
+    } else {
+        t & 0x0001ffff
+    };
+
+    let mut x = (t * c as u32) >> 16;
+    if !fiddle {
+        if x > 6 {
+            x -= (6 * c as u32) >> 8;
+        }
+    } else {
+        if x < 249 {
+            x += (6 * c as u32) >> 8;
+        }
     }
-}
 
-impl Device for Card {}
-impl ControlDevice for Card {}
+    let x = x as u16;
+    let m = (v as u16 - c) as u16;
+    let c = c as u16;
 
-impl Card {
-    pub fn open(path: &str) -> Self {
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        options.write(true);
-        Card(options.open(path).unwrap())
-    }
+    let quad = (((h as u32 + 1) as u32 * DIV_INTO_6 as u32) >> 16) as u8 % 6;
+    let (r, g, b) = match quad {
+        0 => (c + m, x + m, m),
+        1 => (x + m, c + m, m),
+        2 => (m, c + m, x + m),
+        3 => (m, x + m, c + m),
+        4 => (x + m, m, c + m),
+        5 => (c + m, m, x + m),
+        _ => (0, 0, 0),
+    };
+    (r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)
 }
 
 fn main() {
-    let card = Card::open("/dev/dri/card1");
-    println!("{:#?}", card.get_driver().unwrap());
+    let mut surface = Surface::open("/dev/dri/card1").expect("Failed to open surface");
+    let mut start_color = 0usize;
+    let mut start = Instant::now();
+    let mut frames = 0usize;
 
-    card.set_client_capability(drm::ClientCapability::UniversalPlanes, true)
-        .expect("Unable to request UniversalPlanes capability");
-    card.set_client_capability(drm::ClientCapability::Atomic, true)
-        .expect("Unable to request Atomic capability");
+    loop {
+        let mut map = surface.map_buffer().expect("Failed to map buffer");
 
-    // Load the information.
-    let res = card
-        .resource_handles()
-        .expect("Could not load normal resource ids.");
-    let coninfo: Vec<connector::Info> = res
-        .connectors()
-        .iter()
-        .flat_map(|con| card.get_connector(*con, true))
-        .collect();
-    let crtcinfo: Vec<crtc::Info> = res
-        .crtcs()
-        .iter()
-        .flat_map(|crtc| card.get_crtc(*crtc))
-        .collect();
+        let (w, h) = (map.width(), map.height());
+        let (x_c, y_c) = (w / 2, h / 2);
+        let max_l = x_c * x_c + y_c * y_c;
+        for y in 0..h {
+            let y_d = y.max(y_c) - y.min(y_c);
+            let y_d = y_d * y_d;
+            for x in 0..w {
+                let x_d = x.max(x_c) - x.min(x_c);
+                let x_d = x_d * x_d;
+                let dist = y_d + x_d;
 
-    // Filter each connector until we find one that's connected.
-    let con = coninfo
-        .iter()
-        .find(|&i| i.state() == connector::State::Connected)
-        .expect("No connected connectors");
-
-    // Get the first (usually best) mode
-    let &mode = con.modes().first().expect("No modes found on connector");
-
-    let (disp_width, disp_height) = mode.size();
-
-    // Find a crtc and FB
-    let crtc = crtcinfo.first().expect("No crtcs found");
-
-    // Select the pixel format
-    let fmt = DrmFourcc::Xrgb8888;
-
-    // Create a DB
-    // If buffer resolution is above display resolution, a ENOSPC (not enough GPU memory) error may
-    // occur
-    let mut db1 = card
-        .create_dumb_buffer((disp_width.into(), disp_height.into()), fmt, 32)
-        .expect("Could not create dumb buffer");
-    let mut db2 = card
-        .create_dumb_buffer((disp_width.into(), disp_height.into()), fmt, 32)
-        .expect("Could not create dumb buffer");
-
-    // Map it and grey it out.
-    {
-        let mut map = card
-            .map_dumb_buffer(&mut db1)
-            .expect("Could not map dumbbuffer");
-        for b in map.as_mut() {
-            *b = 128;
-        }
-    }
-
-    // Create an FB:
-    let fb1 = card
-        .add_framebuffer(&db1, 24, 32)
-        .expect("Could not create FB");
-    let fb2 = card
-        .add_framebuffer(&db2, 24, 32)
-        .expect("Could not create FB");
-
-    let planes = card.plane_handles().expect("Could not list planes");
-    let (better_planes, compatible_planes): (
-        Vec<control::plane::Handle>,
-        Vec<control::plane::Handle>,
-    ) = planes
-        .iter()
-        .filter(|&&plane| {
-            card.get_plane(plane)
-                .map(|plane_info| {
-                    let compatible_crtcs = res.filter_crtcs(plane_info.possible_crtcs());
-                    compatible_crtcs.contains(&crtc.handle())
-                })
-                .unwrap_or(false)
-        })
-        .partition(|&&plane| {
-            if let Ok(props) = card.get_properties(plane) {
-                for (&id, &val) in props.iter() {
-                    if let Ok(info) = card.get_property(id) {
-                        if info.name().to_str().map(|x| x == "type").unwrap_or(false) {
-                            return val == (drm::control::PlaneType::Primary as u32).into();
-                        }
-                    }
-                }
-            }
-            false
-        });
-    let plane = *better_planes.first().unwrap_or(&compatible_planes[0]);
-
-    println!("{:#?}", mode);
-    println!("{:#?}", fb1);
-    println!("{:#?}", fb2);
-    println!("{:#?}", db1);
-    println!("{:#?}", db2);
-    println!("{:#?}", plane);
-
-    let con_props = card
-        .get_properties(con.handle())
-        .expect("Could not get props of connector")
-        .as_hashmap(&card)
-        .expect("Could not get a prop from connector");
-    let crtc_props = card
-        .get_properties(crtc.handle())
-        .expect("Could not get props of crtc")
-        .as_hashmap(&card)
-        .expect("Could not get a prop from crtc");
-    let plane_props = card
-        .get_properties(plane)
-        .expect("Could not get props of plane")
-        .as_hashmap(&card)
-        .expect("Could not get a prop from plane");
-
-    let mut atomic_req = atomic::AtomicModeReq::new();
-    atomic_req.add_property(
-        con.handle(),
-        con_props["CRTC_ID"].handle(),
-        property::Value::CRTC(Some(crtc.handle())),
-    );
-    let blob = card
-        .create_property_blob(&mode)
-        .expect("Failed to create blob");
-    atomic_req.add_property(crtc.handle(), crtc_props["MODE_ID"].handle(), blob);
-    atomic_req.add_property(
-        crtc.handle(),
-        crtc_props["ACTIVE"].handle(),
-        property::Value::Boolean(true),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["FB_ID"].handle(),
-        property::Value::Framebuffer(Some(fb1)),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["CRTC_ID"].handle(),
-        property::Value::CRTC(Some(crtc.handle())),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["SRC_X"].handle(),
-        property::Value::UnsignedRange(0),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["SRC_Y"].handle(),
-        property::Value::UnsignedRange(0),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["SRC_W"].handle(),
-        property::Value::UnsignedRange((mode.size().0 as u64) << 16),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["SRC_H"].handle(),
-        property::Value::UnsignedRange((mode.size().1 as u64) << 16),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["CRTC_X"].handle(),
-        property::Value::SignedRange(0),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["CRTC_Y"].handle(),
-        property::Value::SignedRange(0),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["CRTC_W"].handle(),
-        property::Value::UnsignedRange(mode.size().0 as u64),
-    );
-    atomic_req.add_property(
-        plane,
-        plane_props["CRTC_H"].handle(),
-        property::Value::UnsignedRange(mode.size().1 as u64),
-    );
-
-    // Set the crtc
-    // On many setups, this requires root access.
-    card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, atomic_req)
-        .expect("Failed to set mode");
-
-    let mut color = 0u32;
-    for i in 0..600 {
-        let mut map = if i % 2 == 0 {
-            card.map_dumb_buffer(&mut db1)
-                .expect("Could not map dumbbuffer")
-        } else {
-            card.map_dumb_buffer(&mut db2)
-                .expect("Could not map dumbbuffer")
-        };
-        color = (i % 2) * 3000 * 2000;
-        //if i < 2 {
-        for p in map.chunks_exact_mut(4) {
-            p[3] = 255;
-            p[2] = ((color >> 16) & 0xff) as u8;
-            p[1] = ((color >> 8) & 0xff) as u8;
-            p[0] = ((color >> 0) & 0xff) as u8;
-            if i % 2 == 0 {
-                color += 1;
+                let h = (dist * 256 * 128 / max_l + start_color) % 256;
+                let s = 255;
+                let v = 255;
+                // Shows a tunnel vision effect
+                /*
+                let v = (256 - dist * 256 / max_l).min(255) as u8;
+                let s = (256 - dist * 256 / max_l).min(255) as u8;
+                */
+                let rgb = hsl_to_rgb(h as u8, s, v);
+                map.set_pixel(x, y, rgb);
             }
         }
-        //}
-        //let one_second = ::std::time::Duration::from_millis(1);
-        //::std::thread::sleep(one_second);
+        start_color += 1;
 
-        card.wait_vblank(
-            drm::VblankWaitTarget::Relative(0),
-            drm::VblankWaitFlags::NEXT_ON_MISS,
-            0,
-            0,
-        );
-        let mut atomic_req = atomic::AtomicModeReq::new();
-        let fb = if i % 2 == 0 { fb1 } else { fb2 };
-
-        /*
-        atomic_req.add_property(
-            plane,
-            plane_props["FB_ID"].handle(),
-            property::Value::Framebuffer(Some(fb)),
-        );
-        card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, atomic_req)
-            .expect("Failed to set mode");
-        */
-        card.page_flip(crtc.handle(), fb, PageFlipFlags::empty(), None);
-    }
-    //let five_seconds = ::std::time::Duration::from_millis(5000);
-    //::std::thread::sleep(five_seconds);
-
-    card.destroy_framebuffer(fb1).unwrap();
-    card.destroy_framebuffer(fb2).unwrap();
-    card.destroy_dumb_buffer(db1).unwrap();
-    card.destroy_dumb_buffer(db2).unwrap();
-
-    let resources = card.resource_handles().unwrap();
-    let plane_res = card.plane_handles().unwrap();
-
-    for &handle in resources.framebuffers() {
-        let info = card.get_framebuffer(handle).unwrap();
-        println!("Framebuffer: {:?}", handle);
-        println!("\tSize: {:?}", info.size());
-        println!("\tPitch: {:?}", info.pitch());
-        println!("\tBPP: {:?}", info.bpp());
-        println!("\tDepth: {:?}", info.depth());
+        frames += 1;
+        if frames > 30 {
+            let elapsed = start.elapsed();
+            let fps = frames as f32 * 1000.0 / elapsed.as_millis() as f32;
+            print!("Average FPS: {:.2}   \r", fps);
+            let _ = io::stdout().flush();
+            frames = 0;
+            start = Instant::now();
+        }
     }
 }
