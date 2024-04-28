@@ -1,17 +1,23 @@
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::os::unix::io::{AsFd, BorrowedFd};
+use std::time::Instant;
 use std::{error, fmt, io};
 
-use drm::control::{dumbbuffer, framebuffer, Device as _, PageFlipFlags};
-use drm::Device as _;
-
-use drm::buffer::DrmFourcc;
+use drm::buffer::{Buffer, DrmFourcc};
 use drm::control;
 use drm::control::atomic;
 use drm::control::connector;
 use drm::control::crtc;
+use drm::control::dumbbuffer;
+use drm::control::framebuffer;
 use drm::control::property;
 use drm::control::AtomicCommitFlags;
+use drm::control::PageFlipFlags;
+
+use drm::{control::Device as _, Device as _};
+
+use crate::graphics::{Renderer, Scene};
 
 struct Card(File);
 
@@ -24,37 +30,35 @@ impl AsFd for Card {
 impl drm::Device for Card {}
 impl drm::control::Device for Card {}
 
-impl Card {
-    pub fn open(path: &str) -> Result<Self, io::Error> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        Ok(Card(file))
-    }
-}
-
 pub struct Surface {
     card: Card,
-    buffers: Vec<CardBuffer>,
-    show_buffer: usize,
-    write_buffer: usize,
+    front_buffer: CardBuffer,
+    back_buffer: CardBuffer,
+    device_name: String,
+    parameters: SurfaceParameters,
     crtc: control::crtc::Handle,
 }
 
 struct CardBuffer {
-    width: u16,
-    height: u16,
     fb: framebuffer::Handle,
     db: dumbbuffer::DumbBuffer,
 }
 
-pub struct WritableSurface<'a> {
-    width: u16,
-    height: u16,
-    mapping: dumbbuffer::DumbMapping<'a>,
+#[derive(Clone, Copy)]
+pub struct SurfaceParameters {
+    pub width: u16,
+    pub height: u16,
+    pub stride: u32,
 }
 
 impl Surface {
     pub fn open(path: &str) -> Result<Self, SurfaceError> {
-        let card = Card::open(path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|err| ("Failed to open DRM file", err))?;
+        let card = Card(file);
 
         card.set_client_capability(drm::ClientCapability::UniversalPlanes, true)
             .map_err(|err| ("Unable to request UniversalPlanes capability", err))?;
@@ -92,23 +96,19 @@ impl Surface {
         let fmt = DrmFourcc::Xrgb8888;
 
         // Create buffers.
-        let buffers = (0..2)
-            .map(|_| {
-                let db = card
-                    .create_dumb_buffer((disp_width.into(), disp_height.into()), fmt, 32)
-                    .map_err(|err| ("Could not create dumb buffer", err))?;
-                let fb = card
-                    .add_framebuffer(&db, 24, 32)
-                    .map_err(|err| ("Could not create FB", err))?;
-                let buf = CardBuffer {
-                    db,
-                    fb,
-                    width: disp_width,
-                    height: disp_height,
-                };
-                Ok(buf)
-            })
-            .collect::<Result<Vec<CardBuffer>, SurfaceError>>()?;
+        let create_buffer = || -> Result<CardBuffer, SurfaceError> {
+            let db = card
+                .create_dumb_buffer((disp_width.into(), disp_height.into()), fmt, 32)
+                .map_err(|err| ("Could not create dumb buffer", err))?;
+            let fb = card
+                .add_framebuffer(&db, 24, 32)
+                .map_err(|err| ("Could not create FB", err))?;
+            let buf = CardBuffer { db, fb };
+            Ok(buf)
+        };
+        let front_buffer: CardBuffer = create_buffer()?;
+        let back_buffer: CardBuffer = create_buffer()?;
+        let pitch = front_buffer.db.pitch();
         let planes = card
             .plane_handles()
             .map_err(|err| ("Could not list planes", err))?;
@@ -174,7 +174,7 @@ impl Surface {
         atomic_req.add_property(
             plane,
             plane_props["FB_ID"].handle(),
-            property::Value::Framebuffer(buffers.first().map(|buf| buf.fb)),
+            property::Value::Framebuffer(Some(front_buffer.fb)),
         );
         atomic_req.add_property(
             plane,
@@ -227,74 +227,98 @@ impl Surface {
         card.atomic_commit(AtomicCommitFlags::ALLOW_MODESET, atomic_req)
             .map_err(|e| ("Failed to set mode", e))?;
 
+        let device_name = card.get_driver()?.name().to_str().unwrap().to_string();
+        let parameters = SurfaceParameters {
+            width: disp_width,
+            height: disp_height,
+            // Pitch contains bytes, not pixels.
+            stride: pitch / 4,
+        };
+
         let surface = Self {
             card,
-            buffers,
+            front_buffer,
+            back_buffer,
+            device_name,
+            parameters,
             crtc: crtc.handle(),
-            show_buffer: 0,
-            write_buffer: 1,
         };
         Ok(surface)
     }
 
-    fn flip_buffer(&mut self) -> Result<(), SurfaceError> {
-        let sb = &self.buffers[self.show_buffer];
-        self.card
-            .page_flip(self.crtc, sb.fb, PageFlipFlags::EVENT, None)?;
-        let _ = self.card.receive_events();
-        Ok(())
+    pub fn parameters(&self) -> SurfaceParameters {
+        self.parameters
     }
 
-    pub fn map_buffer(&mut self) -> Result<WritableSurface, SurfaceError> {
-        if self.show_buffer % 2 == 0 {
-            self.show_buffer = 1;
-            self.write_buffer = 0;
-        } else {
-            self.show_buffer = 0;
-            self.write_buffer = 1;
-        }
-        self.flip_buffer()?;
-        let wb = &mut self.buffers[self.write_buffer];
-        let mapping = self
+    pub fn render_loop(&mut self, mut renderer: Box<dyn Renderer>) -> Result<(), SurfaceError> {
+        let mut framecounter_start = Instant::now();
+        let start = Instant::now();
+        let mut framecounter_frames = 0usize;
+
+        let mut front_mapping = self
             .card
-            .map_dumb_buffer(&mut wb.db)
+            .map_dumb_buffer(&mut self.front_buffer.db)
             .map_err(|err| ("Could not map dumbbuffer", err))?;
-        let ws = WritableSurface {
-            width: wb.width,
-            height: wb.height,
-            mapping,
-        };
-        Ok(ws)
+        let mut back_mapping = self
+            .card
+            .map_dumb_buffer(&mut self.back_buffer.db)
+            .map_err(|err| ("Could not map dumbbuffer", err))?;
+        // TODO: Refactor this to be more reusable
+        self.card
+            .page_flip(self.crtc, self.front_buffer.fb, PageFlipFlags::EVENT, None)?;
+        let _ = self.card.receive_events();
+        let mut display_front = true;
+        loop {
+            display_front = !display_front;
+            let scene = Scene {
+                timecode: start.elapsed().as_secs_f64() * 4.0,
+            };
+            if display_front {
+                match renderer.render(&scene, front_mapping.as_mut()) {
+                    Ok(_) => {}
+                    Err(err) => eprintln!("{}", err),
+                }
+            } else {
+                match renderer.render(&scene, back_mapping.as_mut()) {
+                    Ok(_) => {}
+                    Err(err) => eprintln!("{}", err),
+                }
+            }
+
+            let show_fb = if display_front {
+                self.front_buffer.fb
+            } else {
+                self.back_buffer.fb
+            };
+            self.card
+                .page_flip(self.crtc, show_fb, PageFlipFlags::EVENT, None)?;
+            let _ = self.card.receive_events();
+
+            framecounter_frames += 1;
+            if framecounter_frames > 30 {
+                let elapsed = framecounter_start.elapsed();
+                let fps = framecounter_frames as f32 / elapsed.as_secs_f32() as f32;
+
+                print!("Average FPS: {:.2}   \r", fps);
+                let _ = io::stdout().flush();
+
+                framecounter_frames = 0;
+                framecounter_start = Instant::now();
+            }
+        }
+    }
+
+    pub fn device_name(&self) -> &str {
+        self.device_name.as_str()
     }
 }
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        for buf in &self.buffers {
-            let _ = self.card.destroy_framebuffer(buf.fb);
-            let _ = self.card.destroy_dumb_buffer(buf.db);
-        }
-    }
-}
-
-impl WritableSurface<'_> {
-    pub fn width(&self) -> usize {
-        self.width as usize
-    }
-
-    pub fn height(&self) -> usize {
-        self.height as usize
-    }
-
-    pub fn set_pixel(&mut self, x: usize, y: usize, rgb: (u8, u8, u8)) {
-        let start = (y * self.width as usize + x) * 4;
-        let target = &mut self.mapping[start..start + 4];
-        let (r, g, b) = rgb;
-        // Data is stored as a little-endian u32.
-        target[0] = b;
-        target[1] = g;
-        target[2] = r;
-        target[3] = 255;
+        let _ = self.card.destroy_framebuffer(self.front_buffer.fb);
+        let _ = self.card.destroy_framebuffer(self.back_buffer.fb);
+        let _ = self.card.destroy_dumb_buffer(self.front_buffer.db);
+        let _ = self.card.destroy_dumb_buffer(self.back_buffer.db);
     }
 }
 
