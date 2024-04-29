@@ -36,6 +36,7 @@ struct Display {
 }
 
 const IMAGE_FORMAT: vk::Format = vk::Format::B8G8R8A8_SRGB;
+const MIN_IMAGES: u32 = 2;
 
 struct ImageBuffer {
     fence: vk::Fence,
@@ -315,7 +316,6 @@ impl Gpu {
         };
 
         // Use at least double buffering.
-        const MIN_IMAGES: u32 = 2;
         let min_image_count = if surface_capabilities.max_image_count == 0 {
             surface_capabilities.min_image_count.max(MIN_IMAGES)
         } else {
@@ -476,12 +476,13 @@ impl Gpu {
         image: &ImageBuffer,
     ) -> Result<(), vk::Result> {
         let (r, g, b) = {
-            let timecode = (scene.timecode - scene.timecode.floor()) as f32 / 1000.0;
+            let timecode = scene.timecode / 10.0;
+            let timecode = timecode - timecode.floor() as f64;
             let h = timecode;
             let v = 1.0;
             let s = 1.0;
             let i = (h * 6.0).floor() as u8;
-            let f = h * 6.0 - i as f32;
+            let f = h * 6.0 - i as f64;
             let p = v * (1.0 - s);
             let q = v * (1.0 - f * s);
             let t = v * (1.0 - (1.0 - f) * s);
@@ -495,6 +496,10 @@ impl Gpu {
                 _ => (0.0, 0.0, 0.0),
             }
         };
+        /*
+        let colorvalue = (scene.i % 2) as f32;
+        let (r, g, b) = (colorvalue, colorvalue, colorvalue);
+        */
 
         let command_buffer = image.command_buffer;
 
@@ -511,7 +516,7 @@ impl Gpu {
         let clear_values = [
             vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [r, g, b, 1.0],
+                    float32: [r as f32, g as f32, b as f32, 1.0],
                 },
             },
             vk::ClearValue {
@@ -575,6 +580,7 @@ impl Gpu {
             let queue_suboptimal = self
                 .swapchain_extension
                 .queue_present(self.control.queue, &queue_present_info)?;
+            self.device.queue_wait_idle(self.control.queue)?;
             Ok(RenderFeedback {
                 swapchain_suboptimal,
                 queue_suboptimal,
