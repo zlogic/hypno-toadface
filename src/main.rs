@@ -1,25 +1,50 @@
-mod display;
+use std::{
+    io::{self, Write},
+    time::Instant,
+};
+
+use crate::graphics::Scene;
+
 mod gpu;
 mod graphics;
 
-use graphics::Hardware;
-
-use crate::display::Surface;
-
 fn main() {
-    // TODO: make this configurable.
-    const FILE: &str = "/dev/dri/card1";
-    const HARDWARE: Hardware = Hardware::CPU;
+    let renderer = gpu::Gpu::init().expect("Failed to init GPU");
 
-    let mut surface = Surface::open(FILE).unwrap();
+    println!("Using device: {}", renderer.device_name());
 
-    let renderer = graphics::new_renderer(surface.parameters(), HARDWARE).unwrap();
+    let start = Instant::now();
+    let mut framecounter_start = Instant::now();
+    let mut framecounter_frames = 0usize;
+    loop {
+        let scene = Scene {
+            timecode: start.elapsed().as_secs_f64() * 4.0,
+        };
 
-    println!(
-        "Using device: DRM: {}, renderer: {}",
-        surface.device_name(),
-        renderer.device_name()
-    );
+        let result = match renderer.render(&scene) {
+            Ok(res) => res,
+            Err(err) => {
+                eprintln!("Failed to render scene: {}", err);
+                continue;
+            }
+        };
+        if result.swapchain_suboptimal {
+            eprintln!("Swapchain is suboptimal");
+        }
+        if result.queue_suboptimal {
+            eprintln!("Queue is suboptimal");
+        }
 
-    surface.render_loop(renderer).unwrap();
+        framecounter_frames += 1;
+        if framecounter_frames > 30 {
+            let elapsed = framecounter_start.elapsed();
+            let fps = framecounter_frames as f32 / elapsed.as_secs_f32() as f32;
+
+            print!("Average FPS: {:.2}   \r", fps);
+            let _ = io::stdout().flush();
+
+            framecounter_frames = 0;
+            framecounter_start = Instant::now();
+        }
+    }
 }

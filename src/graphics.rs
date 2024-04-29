@@ -1,14 +1,7 @@
-use std::{error, fmt, io};
-
-use crate::{
-    display::{SurfaceError, SurfaceParameters},
-    gpu::{Gpu, GpuError},
-};
-
 pub struct Scene {
     pub timecode: f64,
 }
-
+/*
 pub trait Renderer {
     fn render(&mut self, scene: &Scene, dst: &mut [u8]) -> Result<(), RendererError>;
     fn device_name(&self) -> &str;
@@ -234,3 +227,4 @@ impl From<&str> for RendererError {
         RendererError::InternalError(msg.to_string())
     }
 }
+*/
