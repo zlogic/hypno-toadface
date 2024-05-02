@@ -1,11 +1,11 @@
-#version 450
+#version 460
 
-vec2 positions[3] = vec2[](
-    vec2(0.0, -0.5),
-    vec2(0.5, 0.5),
-    vec2(-0.5, 0.5)
-);
+/*
+ * Generate a quad without any input data - instead, output vertices using only input vertex indices as input data.
+ * From https://www.saschawillems.de/blog/2016/08/13/vulkan-tutorial-on-rendering-a-fullscreen-quad-without-buffers/
+ */
 
 void main() {
-    gl_Position = vec4(positions[gl_VertexIndex], 0.0, 1.0);
+    vec2 outUV = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    gl_Position = vec4(outUV * 2.0f + -1.0, 0.0f, 1.0f);
 }
