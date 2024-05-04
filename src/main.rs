@@ -38,7 +38,7 @@ fn main() {
         framecounter_frames += 1;
         if framecounter_frames > 100 {
             let elapsed = framecounter_start.elapsed();
-            let fps = framecounter_frames as f32 / elapsed.as_secs_f32() as f32;
+            let fps = framecounter_frames as f32 / elapsed.as_secs_f32();
 
             print!("Average FPS: {:.2}   \r", fps);
             let _ = io::stdout().flush();

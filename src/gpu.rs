@@ -53,7 +53,7 @@ struct Pipeline {
 }
 
 const IMAGE_FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
-const MIN_IMAGES: u32 = 16;
+const MIN_IMAGES: u32 = 2;
 
 struct ImageBuffer {
     view: vk::ImageView,
@@ -166,13 +166,6 @@ impl Gpu {
                 let device = *device;
                 let props = instance.get_physical_device_properties(device);
                 // TODO: check UBO props.limits.max_uniform_buffer_range
-                if false
-                //props.limits.max_push_constants_size < std::mem::size_of::<ShaderParams>() as u32
-                // || props.limits.max_per_stage_descriptor_storage_buffers < MAX_BINDINGS
-                // TODO: add pipeline/descriptor set limitations
-                {
-                    return None;
-                }
                 let queue_index = Gpu::find_graphics_queue(instance, device)?;
 
                 let device_name = props
