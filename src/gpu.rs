@@ -945,6 +945,7 @@ impl Drop for Gpu {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.queue_wait_idle(self.control.queue);
+            let _ = self.device.device_wait_idle();
             self.images.iter().for_each(|image| {
                 image.destroy(
                     &self.device,
