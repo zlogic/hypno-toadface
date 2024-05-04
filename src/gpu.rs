@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::{error, fmt, io};
 
 use ash::prelude::VkResult;
@@ -6,23 +7,25 @@ use ash::{khr, vk};
 use crate::graphics;
 
 pub struct Gpu {
-    entry: ash::Entry,
+    _entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
     device_name: String,
-    display: Display,
+    surface_loader: khr::surface::Instance,
+    surface: vk::SurfaceKHR,
+    display_dimensions: DisplayDimensions,
+    swapchain_loader: khr::swapchain::Device,
     swapchain: vk::SwapchainKHR,
     renderpass: vk::RenderPass,
     pipeline: Pipeline,
     control: Control,
     images: Vec<ImageBuffer>,
-    swapchain_extension: khr::swapchain::Device,
 }
 
-struct Display {
+#[derive(Clone, Copy)]
+struct DisplayDimensions {
     width: u32,
     height: u32,
-    surface: vk::SurfaceKHR,
 }
 
 struct Buffer<T> {
@@ -74,63 +77,107 @@ pub struct RenderFeedback {
     pub queue_suboptimal: bool,
 }
 
+struct ScopeRollback<T, F>
+where
+    F: FnOnce(T),
+{
+    val: Option<T>,
+    rollback: Option<F>,
+}
+
 impl Gpu {
     pub fn init() -> Result<Gpu, GpuError> {
-        let entry = unsafe { ash::Entry::load()? };
-        let instance = unsafe { Gpu::init_vk(&entry)? };
-        let display_extension = khr::display::Instance::new(&entry, &instance);
-        let surface_extension = khr::surface::Instance::new(&entry, &instance);
+        unsafe {
+            // Vulkan init code is long an messy - here's an attempt to make it somewhat atomic and simplify cleanup on error.
+            // Everything depends on everything, and instead of having a struct with lots of Option fields,
+            // init everything in one place and return a fully initialized GPU instance.
+            // If anything goes wrong, ScopeRollback will call desctuctors.
+            let entry = ash::Entry::load()?;
+            let instance = Gpu::init_vk(&entry)?;
+            let instance = ScopeRollback::new(instance, |instance| instance.destroy_instance(None));
+            let display_loader = khr::display::Instance::new(&entry, instance.borrow());
+            let surface_loader = khr::surface::Instance::new(&entry, instance.borrow());
 
-        let (physical_device, device_name, graphics_queue) =
-            unsafe { Gpu::find_device(&instance)? };
-        let (display, display_name) =
-            unsafe { Gpu::create_display(&display_extension, physical_device)? };
-        let device = unsafe { Gpu::create_device(&instance, physical_device, graphics_queue)? };
-        let swapchain_extension = khr::swapchain::Device::new(&instance, &device);
-        let swapchain = unsafe {
-            Gpu::create_swapchain(
-                &surface_extension,
-                &swapchain_extension,
+            let (physical_device, device_name, graphics_queue) =
+                Gpu::find_device(instance.borrow())?;
+            let (surface, display_dimensions, display_name) =
+                Gpu::create_display(&display_loader, physical_device)?;
+            let surface = ScopeRollback::new(surface, |surface| {
+                surface_loader.destroy_surface(surface, None)
+            });
+            let device = Gpu::create_device(instance.borrow(), physical_device, graphics_queue)?;
+            let device = ScopeRollback::new(device, |device| device.destroy_device(None));
+
+            let swapchain_loader = khr::swapchain::Device::new(instance.borrow(), device.borrow());
+            let (swapchain, images_count) = Gpu::create_swapchain(
+                &surface_loader,
+                &swapchain_loader,
                 physical_device,
                 graphics_queue,
-                &display,
-            )?
-        };
-        let renderpass = unsafe { Gpu::create_renderpass(&device)? };
-        // TODO: cleanup on error
-        let pipeline = unsafe { Gpu::create_pipeline_layout(&device, &display, renderpass)? };
-        let control = unsafe { Gpu::create_control(&device, graphics_queue)? };
-        let memory_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
-        let images = unsafe {
-            Gpu::create_image_buffers(
-                &swapchain_extension,
-                &device,
+                *surface.borrow(),
+                display_dimensions,
+            )?;
+            let swapchain = ScopeRollback::new(swapchain, |swapchain| {
+                swapchain_loader.destroy_swapchain(swapchain, None)
+            });
+
+            let renderpass = Gpu::create_renderpass(device.borrow())?;
+            let renderpass = ScopeRollback::new(renderpass, |renderpass| {
+                let device: &ash::Device = device.borrow();
+                device.destroy_render_pass(renderpass, None)
+            });
+            let pipeline = Gpu::create_pipeline_layout(
+                device.borrow(),
+                display_dimensions,
+                *renderpass.borrow(),
+                images_count as u32,
+            )?;
+            let control = Gpu::create_control(device.borrow(), graphics_queue)?;
+            let control = ScopeRollback::new(control, |control| control.destroy(device.borrow()));
+
+            let memory_properties = {
+                let instance: &ash::Instance = instance.borrow();
+                instance.get_physical_device_memory_properties(physical_device)
+            };
+            let images = Gpu::create_image_buffers(
+                &swapchain_loader,
+                device.borrow(),
                 &memory_properties,
+                *swapchain.borrow(),
+                *renderpass.borrow(),
+                {
+                    let control: &Control = control.borrow();
+                    control.command_pool
+                },
+                display_dimensions,
+                &pipeline,
+            )?;
+            let device_name = format!(
+                "GPU: {}, display: {} ({}x{})",
+                device_name, display_name, display_dimensions.width, display_dimensions.height
+            );
+
+            // All is good - consume instances and defuse the scope rollback.
+            let surface = surface.consume();
+            let swapchain = swapchain.consume();
+            let control = control.consume();
+            let renderpass = renderpass.consume();
+            Ok(Gpu {
+                _entry: entry,
+                instance: instance.consume(),
+                device: device.consume(),
+                device_name,
+                surface_loader,
+                surface,
+                display_dimensions,
+                swapchain_loader,
                 swapchain,
                 renderpass,
-                control.command_pool,
-                &display,
-                &pipeline,
-            )?
-        };
-        let device_name = format!(
-            "GPU: {}, display: {} ({}x{})",
-            device_name, display_name, display.width, display.height
-        );
-        Ok(Gpu {
-            entry,
-            instance,
-            device,
-            device_name,
-            display,
-            swapchain,
-            renderpass,
-            pipeline,
-            control,
-            images,
-            swapchain_extension,
-        })
+                pipeline,
+                control,
+                images,
+            })
+        }
     }
 
     pub fn device_name(&self) -> &str {
@@ -211,23 +258,23 @@ impl Gpu {
     }
 
     unsafe fn create_display(
-        display_extension: &khr::display::Instance,
+        display_loader: &khr::display::Instance,
         physical_device: vk::PhysicalDevice,
-    ) -> Result<(Display, String), GpuError> {
-        let displays = display_extension.get_physical_device_display_properties(physical_device)?;
+    ) -> Result<(vk::SurfaceKHR, DisplayDimensions, String), GpuError> {
+        let displays = display_loader.get_physical_device_display_properties(physical_device)?;
         let display = displays.first().ok_or("No displays found")?;
 
         let display_modes =
-            display_extension.get_display_mode_properties(physical_device, display.display)?;
+            display_loader.get_display_mode_properties(physical_device, display.display)?;
         let display_mode = display_modes.first().ok_or("No display modes found")?;
 
         let display_planes =
-            display_extension.get_physical_device_display_plane_properties(physical_device)?;
+            display_loader.get_physical_device_display_plane_properties(physical_device)?;
         let display_plane_index = display_planes
             .iter()
             .enumerate()
             .find_map(|(i, _plane)| {
-                let supported_displays = display_extension
+                let supported_displays = display_loader
                     .get_display_plane_supported_displays(physical_device, i as u32)
                     .ok()?;
                 if supported_displays.contains(&display.display) {
@@ -237,7 +284,7 @@ impl Gpu {
 
                 // TODO: check capabilities?
                 /*
-                let caps = display_extension
+                let caps = display_loader
                     .get_display_plane_capabilities(
                         physical_device,
                         display_mode.display_mode,
@@ -252,7 +299,7 @@ impl Gpu {
 
         let display_mode_create_info =
             vk::DisplayModeCreateInfoKHR::default().parameters(display_mode.parameters);
-        let surface_display_mode = display_extension.create_display_mode(
+        let surface_display_mode = display_loader.create_display_mode(
             physical_device,
             display.display,
             &display_mode_create_info,
@@ -264,7 +311,7 @@ impl Gpu {
             .plane_index(display_plane_index as u32)
             .image_extent(display_mode.parameters.visible_region);
         let display_plane_surface =
-            display_extension.create_display_plane_surface(&display_surface_create_info, None)?;
+            display_loader.create_display_plane_surface(&display_surface_create_info, None)?;
 
         let display_name = display
             .display_name_as_c_str()
@@ -272,12 +319,11 @@ impl Gpu {
             .to_string_lossy()
             .to_string();
 
-        let display = Display {
+        let display_dimensions = DisplayDimensions {
             width: display_mode.parameters.visible_region.width,
             height: display_mode.parameters.visible_region.height,
-            surface: display_plane_surface,
         };
-        Ok((display, display_name))
+        Ok((display_plane_surface, display_dimensions, display_name))
     }
 
     unsafe fn create_device(
@@ -298,33 +344,34 @@ impl Gpu {
     }
 
     unsafe fn create_swapchain(
-        surface_extension: &khr::surface::Instance,
-        swapchain_extension: &khr::swapchain::Device,
+        surface_loader: &khr::surface::Instance,
+        swapchain_loader: &khr::swapchain::Device,
         physical_device: vk::PhysicalDevice,
         graphics_queue_index: u32,
-        display: &Display,
-    ) -> Result<vk::SwapchainKHR, GpuError> {
-        let surface_capabilities = surface_extension
-            .get_physical_device_surface_capabilities(physical_device, display.surface)?;
+        surface: vk::SurfaceKHR,
+        dimensions: DisplayDimensions,
+    ) -> Result<(vk::SwapchainKHR, usize), GpuError> {
+        let surface_capabilities =
+            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?;
         if !surface_capabilities
             .supported_composite_alpha
             .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
         {
-            return Err("opaque composite alpha not supported".into());
+            return Err("Opaque composite alpha not supported".into());
         }
 
-        let device_supported = surface_extension.get_physical_device_surface_support(
+        let device_supported = surface_loader.get_physical_device_surface_support(
             physical_device,
             graphics_queue_index,
-            display.surface,
+            surface,
         )?;
         if !device_supported {
             return Err("Device doesn't support surface".into());
         }
 
         // TODO: pick a presentation mode from a prioritized list?
-        let supports_mailbox = surface_extension
-            .get_physical_device_surface_present_modes(physical_device, display.surface)?
+        let supports_mailbox = surface_loader
+            .get_physical_device_surface_present_modes(physical_device, surface)?
             .contains(&vk::PresentModeKHR::MAILBOX);
         let present_mode = if supports_mailbox {
             vk::PresentModeKHR::MAILBOX
@@ -343,8 +390,8 @@ impl Gpu {
         };
 
         // Choose the best image format.
-        let surface_formats = surface_extension
-            .get_physical_device_surface_formats(physical_device, display.surface)?;
+        let surface_formats =
+            surface_loader.get_physical_device_surface_formats(physical_device, surface)?;
         surface_formats
             .iter()
             .find(|format| {
@@ -355,14 +402,11 @@ impl Gpu {
 
         let queue_family_indices = [graphics_queue_index];
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(display.surface)
+            .surface(surface)
             .min_image_count(min_image_count)
             .image_format(IMAGE_FORMAT)
             .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .image_extent(vk::Extent2D {
-                width: display.width,
-                height: display.height,
-            })
+            .image_extent(dimensions.extent())
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -372,92 +416,12 @@ impl Gpu {
             .clipped(true)
             .present_mode(present_mode);
 
-        Ok(swapchain_extension.create_swapchain(&swapchain_create_info, None)?)
-    }
-
-    unsafe fn create_image_buffers(
-        swapchain_extension: &khr::swapchain::Device,
-        device: &ash::Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        swapchain: vk::SwapchainKHR,
-        renderpass: vk::RenderPass,
-        command_pool: vk::CommandPool,
-        display: &Display,
-        pipeline: &Pipeline,
-    ) -> Result<Vec<ImageBuffer>, GpuError> {
-        let swapchain_images = swapchain_extension.get_swapchain_images(swapchain)?;
-        swapchain_images
-            .iter()
-            .map(|image| {
-                Gpu::create_image_buffer(
-                    &device,
-                    &memory_properties,
-                    *image,
-                    renderpass,
-                    command_pool,
-                    display,
-                    pipeline,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-    }
-
-    unsafe fn create_image_buffer(
-        device: &ash::Device,
-        memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        image: vk::Image,
-        renderpass: vk::RenderPass,
-        command_pool: vk::CommandPool,
-        display: &Display,
-        pipeline: &Pipeline,
-    ) -> Result<ImageBuffer, GpuError> {
-        // TODO: cleanup on error
-        let component_mapping = vk::ComponentMapping::default()
-            .r(vk::ComponentSwizzle::R)
-            .g(vk::ComponentSwizzle::G)
-            .b(vk::ComponentSwizzle::B)
-            .a(vk::ComponentSwizzle::A);
-        let subresource_range = vk::ImageSubresourceRange::default()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .base_mip_level(0)
-            .level_count(1)
-            .base_array_layer(0)
-            .layer_count(1);
-        let image_view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(IMAGE_FORMAT)
-            .components(component_mapping)
-            .subresource_range(subresource_range);
-        let view = device.create_image_view(&image_view_info, None)?;
-
-        let attachments = [view];
-        let framebuffer_create_info = vk::FramebufferCreateInfo::default()
-            .render_pass(renderpass)
-            .attachments(&attachments)
-            .width(display.width)
-            .height(display.height)
-            .layers(1);
-        let framebuffer = device.create_framebuffer(&framebuffer_create_info, None)?;
-
-        let command_buffers_info = vk::CommandBufferAllocateInfo::default()
-            .command_buffer_count(1)
-            .command_pool(command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY);
-        let command_buffer = device.allocate_command_buffers(&command_buffers_info)?[0];
-
-        let param_buffer: Buffer<ShaderParams> =
-            unsafe { Gpu::create_buffer::<ShaderParams>(&device, &memory_properties, &pipeline)? };
-        Ok(ImageBuffer {
-            view,
-            framebuffer,
-            command_buffer,
-            param_buffer,
-        })
+        let swapchain = swapchain_loader.create_swapchain(&swapchain_create_info, None)?;
+        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
+        Ok((swapchain, swapchain_images.len()))
     }
 
     unsafe fn create_renderpass(device: &ash::Device) -> Result<vk::RenderPass, vk::Result> {
-        // TODO: cleanup on error
         let color_attachment_description = vk::AttachmentDescription::default()
             .format(IMAGE_FORMAT)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -481,6 +445,274 @@ impl Gpu {
         device.create_render_pass(&render_pass_create_info, None)
     }
 
+    unsafe fn create_pipeline_layout(
+        device: &ash::Device,
+        dimensions: DisplayDimensions,
+        renderpass: vk::RenderPass,
+        images_count: u32,
+    ) -> Result<Pipeline, GpuError> {
+        let vertex_code: &[u8] = include_bytes!("../shaders/hypno-toadface.vert.spv");
+        let fragment_code: &[u8] = include_bytes!("../shaders/hypno-toadface.frag.spv");
+        let vertex_code = ash::util::read_spv(&mut std::io::Cursor::new(vertex_code))?;
+        let fragment_code = ash::util::read_spv(&mut std::io::Cursor::new(fragment_code))?;
+        let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(vertex_code.as_slice());
+        let fragment_shader_info =
+            vk::ShaderModuleCreateInfo::default().code(fragment_code.as_slice());
+        let vertex_shader_module = device
+            .create_shader_module(&vertex_shader_info, None)
+            .map_err(|err| ("Vertex shader module error", err))?;
+        let vertex_shader_module = ScopeRollback::new(vertex_shader_module, |module| {
+            device.destroy_shader_module(module, None)
+        });
+        let fragment_shader_module = device
+            .create_shader_module(&fragment_shader_info, None)
+            .map_err(|err| ("Fragment shader module error", err))?;
+        let fragment_shader_module = ScopeRollback::new(fragment_shader_module, |module| {
+            device.destroy_shader_module(module, None)
+        });
+
+        let shader_stage_create_infos = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .module(*vertex_shader_module.borrow())
+                .name(c"main")
+                .stage(vk::ShaderStageFlags::VERTEX),
+            vk::PipelineShaderStageCreateInfo::default()
+                .module(*fragment_shader_module.borrow())
+                .name(c"main")
+                .stage(vk::ShaderStageFlags::FRAGMENT),
+        ];
+
+        // Do not bind any vertex buffers to pipeline, the vertex buffer will generate them directly.
+        let vertex_input_state_info = vk::PipelineVertexInputStateCreateInfo::default()
+            .vertex_attribute_descriptions(&[])
+            .vertex_binding_descriptions(&[]);
+        let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        let scissors = [dimensions.render_area()];
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dimensions.width as f32,
+            height: dimensions.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let viewport_state_info = vk::PipelineViewportStateCreateInfo::default()
+            .scissors(&scissors)
+            .viewports(&viewports);
+
+        let rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .line_width(1.0)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(vk::CullModeFlags::BACK);
+        let multisample_state_info = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
+            .sample_shading_enable(false);
+
+        let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .logic_op(vk::LogicOp::COPY)
+            .attachments(&color_blend_attachment_states);
+
+        let dynamic_state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state_info =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_state);
+
+        let descriptor_pool_size = [vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(images_count)];
+        let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(images_count)
+            .pool_sizes(&descriptor_pool_size);
+
+        let descriptor_pool = device.create_descriptor_pool(&descriptor_pool_info, None)?;
+        let descriptor_pool = ScopeRollback::new(descriptor_pool, |descriptor_pool| {
+            device.destroy_descriptor_pool(descriptor_pool, None)
+        });
+
+        let layout_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let layout_bindings = [layout_binding];
+        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
+        let descriptor_set_layout = device.create_descriptor_set_layout(&layout_info, None)?;
+        let descriptor_set_layout =
+            ScopeRollback::new(descriptor_set_layout, |descriptor_set_layout| {
+                device.destroy_descriptor_set_layout(descriptor_set_layout, None)
+            });
+
+        let descriptor_set_layouts = [*descriptor_set_layout.borrow()];
+        let layout_create_info =
+            vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
+        let layout = device.create_pipeline_layout(&layout_create_info, None)?;
+        let layout = ScopeRollback::new(layout, |layout| {
+            device.destroy_pipeline_layout(layout, None)
+        });
+
+        let graphic_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stage_create_infos)
+            .vertex_input_state(&vertex_input_state_info)
+            .input_assembly_state(&vertex_input_assembly_state_info)
+            .viewport_state(&viewport_state_info)
+            .rasterization_state(&rasterization_info)
+            .multisample_state(&multisample_state_info)
+            .color_blend_state(&color_blend_state)
+            .dynamic_state(&dynamic_state_info)
+            .layout(*layout.borrow())
+            .render_pass(renderpass);
+
+        let graphics_pipelines = device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[graphic_pipeline_info], None)
+            .map_err(|(_pipelines, err)| err)?;
+        let pipeline = graphics_pipelines[0];
+
+        Ok(Pipeline {
+            vertex_shader_module: vertex_shader_module.consume(),
+            fragment_shader_module: fragment_shader_module.consume(),
+            pipeline,
+            viewports,
+            scissors,
+            layout: layout.consume(),
+            descriptor_pool: descriptor_pool.consume(),
+            descriptor_set_layout: descriptor_set_layout.consume(),
+        })
+    }
+
+    unsafe fn create_control(
+        device: &ash::Device,
+        queue_family_index: u32,
+    ) -> Result<Control, vk::Result> {
+        let queue = device.get_device_queue(queue_family_index, 0);
+        let command_pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let command_pool = device.create_command_pool(&command_pool_info, None)?;
+        let command_pool = ScopeRollback::new(command_pool, |command_pool| {
+            device.destroy_command_pool(command_pool, None)
+        });
+        let fence_create_info =
+            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let fence = device.create_fence(&fence_create_info, None)?;
+        let fence = ScopeRollback::new(fence, |fence| device.destroy_fence(fence, None));
+        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+        let present_complete_semaphore = device.create_semaphore(&semaphore_create_info, None)?;
+        let present_complete_semaphore =
+            ScopeRollback::new(present_complete_semaphore, |semaphore| {
+                device.destroy_semaphore(semaphore, None)
+            });
+        let rendering_complete_semaphore = device.create_semaphore(&semaphore_create_info, None)?;
+        Ok(Control {
+            queue,
+            command_pool: command_pool.consume(),
+            fence: fence.consume(),
+            present_complete_semaphore: present_complete_semaphore.consume(),
+            rendering_complete_semaphore,
+        })
+    }
+
+    unsafe fn create_image_buffers(
+        swapchain_loader: &khr::swapchain::Device,
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        swapchain: vk::SwapchainKHR,
+        renderpass: vk::RenderPass,
+        command_pool: vk::CommandPool,
+        dimensions: DisplayDimensions,
+        pipeline: &Pipeline,
+    ) -> Result<Vec<ImageBuffer>, GpuError> {
+        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
+        let mut images = vec![];
+        for image in swapchain_images {
+            let image = Gpu::create_image_buffer(
+                &device,
+                &memory_properties,
+                image,
+                renderpass,
+                command_pool,
+                dimensions,
+                pipeline,
+            )
+            .map_err(|err| {
+                images.iter().for_each(|image: &ImageBuffer| {
+                    image.destroy(device, command_pool, pipeline.descriptor_pool)
+                });
+                err
+            })?;
+            images.push(image);
+        }
+        Ok(images)
+    }
+
+    unsafe fn create_image_buffer(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        image: vk::Image,
+        renderpass: vk::RenderPass,
+        command_pool: vk::CommandPool,
+        dimensions: DisplayDimensions,
+        pipeline: &Pipeline,
+    ) -> Result<ImageBuffer, GpuError> {
+        let component_mapping = vk::ComponentMapping::default()
+            .r(vk::ComponentSwizzle::R)
+            .g(vk::ComponentSwizzle::G)
+            .b(vk::ComponentSwizzle::B)
+            .a(vk::ComponentSwizzle::A);
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let image_view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(IMAGE_FORMAT)
+            .components(component_mapping)
+            .subresource_range(subresource_range);
+        let view = device.create_image_view(&image_view_info, None)?;
+        let view = ScopeRollback::new(view, |view| device.destroy_image_view(view, None));
+
+        let attachments = [*view.borrow()];
+        let framebuffer_create_info = vk::FramebufferCreateInfo::default()
+            .render_pass(renderpass)
+            .attachments(&attachments)
+            .width(dimensions.width)
+            .height(dimensions.height)
+            .layers(1);
+        let framebuffer = device.create_framebuffer(&framebuffer_create_info, None)?;
+        let framebuffer = ScopeRollback::new(framebuffer, |framebuffer| {
+            device.destroy_framebuffer(framebuffer, None)
+        });
+
+        let command_buffers_info = vk::CommandBufferAllocateInfo::default()
+            .command_buffer_count(1)
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY);
+        let command_buffers = device.allocate_command_buffers(&command_buffers_info)?;
+        let command_buffer = ScopeRollback::new(command_buffers[0], |_| {
+            device.free_command_buffers(command_pool, &command_buffers)
+        });
+
+        let param_buffer: Buffer<ShaderParams> =
+            Gpu::create_buffer::<ShaderParams>(&device, &memory_properties, &pipeline)?;
+        Ok(ImageBuffer {
+            view: view.consume(),
+            framebuffer: framebuffer.consume(),
+            command_buffer: command_buffer.consume(),
+            param_buffer,
+        })
+    }
+
     unsafe fn create_buffer<T>(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
@@ -495,7 +727,8 @@ impl Gpu {
             .usage(usage_flags)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buffer = device.create_buffer(&buffer_create_info, None)?;
-        let memory_requirements = device.get_buffer_memory_requirements(buffer);
+        let buffer = ScopeRollback::new(buffer, |buffer| device.destroy_buffer(buffer, None));
+        let memory_requirements = device.get_buffer_memory_requirements(*buffer.borrow());
         // Most vendors provide a sorted list - with less features going first.
         // As soon as the right flag is found, this search will stop, so it should pick a memory
         // type with the closest match.
@@ -530,19 +763,21 @@ impl Gpu {
         let (buffer_memory, host_coherent) = if let Some(mem) = buffer_memory {
             mem
         } else {
-            device.destroy_buffer(buffer, None);
             return Err("Cannot find suitable memory".into());
         };
-        device.bind_buffer_memory(buffer, buffer_memory, 0)?;
-        let mapped_memory = device
-            .map_memory(buffer_memory, 0, size as u64, vk::MemoryMapFlags::empty())
-            .map_err(|err| {
-                device.destroy_buffer(buffer, None);
-                device.free_memory(buffer_memory, None);
-                err
-            })?;
+        let buffer_memory =
+            ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
+        device.bind_buffer_memory(*buffer.borrow(), *buffer_memory.borrow(), 0)?;
+        let mapped_memory = device.map_memory(
+            *buffer_memory.borrow(),
+            0,
+            size as u64,
+            vk::MemoryMapFlags::empty(),
+        )?;
         let mapped_memory = mapped_memory as *mut T;
-        // TODO: unmap memory on cleanup.
+        let mapped_memory = ScopeRollback::new(mapped_memory, |_| {
+            device.unmap_memory(*buffer_memory.borrow())
+        });
 
         let layouts = [pipeline.descriptor_set_layout];
         let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo::default()
@@ -550,200 +785,30 @@ impl Gpu {
             .set_layouts(&layouts);
         let descriptor_sets = device.allocate_descriptor_sets(&descriptor_set_allocate_info)?;
         let descriptor_set = descriptor_sets[0];
+        let descriptor_set = ScopeRollback::new(descriptor_set, |descriptor_set| {
+            let _ = device.free_descriptor_sets(pipeline.descriptor_pool, &[descriptor_set]);
+        });
 
         let buffer_info = vk::DescriptorBufferInfo::default()
-            .buffer(buffer)
+            .buffer(*buffer.borrow())
             .offset(0)
             .range(size as u64);
         let buffer_infos = [buffer_info];
         let write_descriptor = vk::WriteDescriptorSet::default()
-            .dst_set(descriptor_set)
+            .dst_set(*descriptor_set.borrow())
             .dst_binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&buffer_infos);
         device.update_descriptor_sets(&[write_descriptor], &[]);
 
+        let mapped_memory = mapped_memory.consume();
+        let buffer_memory = buffer_memory.consume();
         Ok(Buffer {
-            buffer,
+            buffer: buffer.consume(),
             buffer_memory,
             mapped_memory,
-            descriptor_set,
+            descriptor_set: descriptor_set.consume(),
             host_coherent,
-        })
-    }
-
-    unsafe fn create_pipeline_layout(
-        device: &ash::Device,
-        display: &Display,
-        renderpass: vk::RenderPass,
-    ) -> Result<Pipeline, GpuError> {
-        // TODO: cleanup on error
-        let vertex_code: &[u8] = include_bytes!("../shaders/hypno-toadface.vert.spv");
-        let fragment_code: &[u8] = include_bytes!("../shaders/hypno-toadface.frag.spv");
-        let vertex_code = ash::util::read_spv(&mut std::io::Cursor::new(vertex_code))?;
-        let fragment_code = ash::util::read_spv(&mut std::io::Cursor::new(fragment_code))?;
-        let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(vertex_code.as_slice());
-        let fragment_shader_info =
-            vk::ShaderModuleCreateInfo::default().code(fragment_code.as_slice());
-        let vertex_shader_module = device
-            .create_shader_module(&vertex_shader_info, None)
-            .map_err(|err| ("Vertex shader module error", err))?;
-        let fragment_shader_module = device
-            .create_shader_module(&fragment_shader_info, None)
-            .map_err(|err| ("Fragment shader module error", err))?;
-
-        let shader_stage_create_infos = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .module(vertex_shader_module)
-                .name(c"main")
-                .stage(vk::ShaderStageFlags::VERTEX),
-            vk::PipelineShaderStageCreateInfo::default()
-                .module(fragment_shader_module)
-                .name(c"main")
-                .stage(vk::ShaderStageFlags::FRAGMENT),
-        ];
-
-        // Do not bind any vertex buffers to pipeline, the vertex buffer will generate them directly.
-        let vertex_input_state_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_attribute_descriptions(&[])
-            .vertex_binding_descriptions(&[]);
-        let vertex_input_assembly_state_info = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .primitive_restart_enable(false);
-
-        let scissors = [vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: display.width,
-                height: display.height,
-            },
-        }];
-
-        let viewports = [vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: display.width as f32,
-            height: display.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        }];
-        let viewport_state_info = vk::PipelineViewportStateCreateInfo::default()
-            .scissors(&scissors)
-            .viewports(&viewports);
-
-        let rasterization_info = vk::PipelineRasterizationStateCreateInfo::default()
-            .front_face(vk::FrontFace::CLOCKWISE)
-            .depth_clamp_enable(false)
-            .rasterizer_discard_enable(false)
-            .line_width(1.0)
-            .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::BACK);
-        let multisample_state_info = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1)
-            .sample_shading_enable(false);
-
-        let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let color_blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .logic_op(vk::LogicOp::COPY)
-            .attachments(&color_blend_attachment_states);
-
-        let dynamic_state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state_info =
-            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_state);
-
-        let descriptor_pool_size = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(MIN_IMAGES)];
-        let descriptor_pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(MIN_IMAGES)
-            .pool_sizes(&descriptor_pool_size);
-
-        // TODO: cleanup on error
-        let descriptor_pool = device.create_descriptor_pool(&descriptor_pool_info, None)?;
-
-        let layout_binding = vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let layout_bindings = [layout_binding];
-        let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
-        let descriptor_set_layout = device.create_descriptor_set_layout(&layout_info, None)?;
-
-        let descriptor_set_layouts = [descriptor_set_layout];
-        let layout_create_info =
-            vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
-        let layout = device.create_pipeline_layout(&layout_create_info, None)?;
-
-        let graphic_pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&shader_stage_create_infos)
-            .vertex_input_state(&vertex_input_state_info)
-            .input_assembly_state(&vertex_input_assembly_state_info)
-            .viewport_state(&viewport_state_info)
-            .rasterization_state(&rasterization_info)
-            .multisample_state(&multisample_state_info)
-            .color_blend_state(&color_blend_state)
-            .dynamic_state(&dynamic_state_info)
-            .layout(layout)
-            .render_pass(renderpass);
-
-        let graphics_pipelines = device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &[graphic_pipeline_info], None)
-            .map_err(|(_pipelines, err)| err)?;
-        let pipeline = graphics_pipelines[0];
-
-        Ok(Pipeline {
-            vertex_shader_module,
-            fragment_shader_module,
-            pipeline,
-            viewports,
-            scissors,
-            layout,
-            descriptor_pool,
-            descriptor_set_layout,
-        })
-    }
-
-    unsafe fn create_control(
-        device: &ash::Device,
-        queue_family_index: u32,
-    ) -> Result<Control, vk::Result> {
-        let queue = device.get_device_queue(queue_family_index, 0);
-        let command_pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool = device.create_command_pool(&command_pool_info, None)?;
-        let cleanup_err = |err| {
-            device.destroy_command_pool(command_pool, None);
-            err
-        };
-        let fence_create_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let fence = device
-            .create_fence(&fence_create_info, None)
-            .map_err(cleanup_err)?;
-        let cleanup_err = |err| {
-            device.destroy_command_pool(command_pool, None);
-            device.destroy_fence(fence, None);
-            err
-        };
-        // TODO: cleanup unused resources
-        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
-        let present_complete_semaphore = device
-            .create_semaphore(&semaphore_create_info, None)
-            .map_err(cleanup_err)?;
-        let rendering_complete_semaphore = device
-            .create_semaphore(&semaphore_create_info, None)
-            .map_err(cleanup_err)?;
-        Ok(Control {
-            queue,
-            command_pool,
-            fence,
-            present_complete_semaphore,
-            rendering_complete_semaphore,
         })
     }
 
@@ -757,8 +822,8 @@ impl Gpu {
         let buffer = &self.images[image_index].param_buffer;
         let timecode = scene.timecode / 100.0;
         let timecode = timecode - timecode.floor();
-        let width = self.display.width as f32 / 2.0;
-        let height = self.display.height as f32 / 2.0;
+        let width = self.display_dimensions.width as f32 / 2.0;
+        let height = self.display_dimensions.height as f32 / 2.0;
         let max_distance = width * width + height * height;
         let params = ShaderParams {
             _timecode: timecode as f32,
@@ -806,17 +871,10 @@ impl Gpu {
                 float32: [0.0, 0.0, 0.0, 1.0],
             },
         }];
-        let render_area = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: self.display.width,
-                height: self.display.height,
-            },
-        };
         let render_pass_begin = vk::RenderPassBeginInfo::default()
             .render_pass(self.renderpass)
             .framebuffer(image.framebuffer)
-            .render_area(render_area)
+            .render_area(self.display_dimensions.render_area())
             .clear_values(&clear_values);
 
         self.device.cmd_begin_render_pass(
@@ -864,7 +922,7 @@ impl Gpu {
 
     pub fn render(&self, scene: &graphics::Scene) -> Result<RenderFeedback, GpuError> {
         unsafe {
-            let (image_index, swapchain_suboptimal) = self.swapchain_extension.acquire_next_image(
+            let (image_index, swapchain_suboptimal) = self.swapchain_loader.acquire_next_image(
                 self.swapchain,
                 u64::MAX,
                 self.control.present_complete_semaphore,
@@ -882,14 +940,127 @@ impl Gpu {
                 .image_indices(&image_indices);
 
             let queue_suboptimal = self
-                .swapchain_extension
+                .swapchain_loader
                 .queue_present(self.control.queue, &queue_present_info)?;
-            // TODO: move this into the cleanup function
-            // self.device.queue_wait_idle(self.control.queue)?;
             Ok(RenderFeedback {
                 swapchain_suboptimal,
                 queue_suboptimal,
             })
+        }
+    }
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.device.queue_wait_idle(self.control.queue);
+            self.images.iter().for_each(|image| {
+                image.destroy(
+                    &self.device,
+                    self.control.command_pool,
+                    self.pipeline.descriptor_pool,
+                )
+            });
+            self.control.destroy(&self.device);
+            self.pipeline.destroy(&self.device);
+            self.device.destroy_render_pass(self.renderpass, None);
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
+            self.surface_loader.destroy_surface(self.surface, None);
+            self.device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
+impl Control {
+    unsafe fn destroy(&self, device: &ash::Device) {
+        device.destroy_semaphore(self.rendering_complete_semaphore, None);
+        device.destroy_semaphore(self.present_complete_semaphore, None);
+        device.destroy_fence(self.fence, None);
+        device.destroy_command_pool(self.command_pool, None);
+    }
+}
+
+impl<T> Buffer<T> {
+    unsafe fn destroy(&self, device: &ash::Device, descriptor_pool: vk::DescriptorPool) {
+        let _ = device.free_descriptor_sets(descriptor_pool, &[self.descriptor_set]);
+        device.unmap_memory(self.buffer_memory);
+        device.free_memory(self.buffer_memory, None);
+        device.destroy_buffer(self.buffer, None);
+    }
+}
+
+impl ImageBuffer {
+    unsafe fn destroy(
+        &self,
+        device: &ash::Device,
+        command_pool: vk::CommandPool,
+        descriptor_pool: vk::DescriptorPool,
+    ) {
+        self.param_buffer.destroy(device, descriptor_pool);
+        device.free_command_buffers(command_pool, &[self.command_buffer]);
+        device.destroy_framebuffer(self.framebuffer, None);
+        device.destroy_image_view(self.view, None);
+    }
+}
+
+impl Pipeline {
+    unsafe fn destroy(&self, device: &ash::Device) {
+        device.destroy_pipeline_layout(self.layout, None);
+        device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+        device.destroy_descriptor_pool(self.descriptor_pool, None);
+        device.destroy_shader_module(self.fragment_shader_module, None);
+        device.destroy_shader_module(self.vertex_shader_module, None);
+    }
+}
+
+impl DisplayDimensions {
+    fn extent(&self) -> vk::Extent2D {
+        vk::Extent2D::default()
+            .width(self.width)
+            .height(self.height)
+    }
+
+    fn render_area(&self) -> vk::Rect2D {
+        let offset = vk::Offset2D::default().x(0).y(0);
+        vk::Rect2D::default().offset(offset).extent(self.extent())
+    }
+}
+
+impl<T, F> ScopeRollback<T, F>
+where
+    F: FnOnce(T),
+{
+    fn new(val: T, rollback: F) -> ScopeRollback<T, F> {
+        ScopeRollback {
+            val: Some(val),
+            rollback: Some(rollback),
+        }
+    }
+
+    fn consume(mut self) -> T {
+        self.rollback = None;
+        self.val.take().unwrap()
+    }
+}
+
+impl<T, F> Borrow<T> for ScopeRollback<T, F>
+where
+    F: FnOnce(T),
+{
+    fn borrow(&self) -> &T {
+        &self.val.as_ref().unwrap()
+    }
+}
+
+impl<T, F> Drop for ScopeRollback<T, F>
+where
+    F: FnOnce(T),
+{
+    fn drop(&mut self) {
+        if let Some(val) = self.val.take() {
+            self.rollback.take().map(|rb| rb(val));
         }
     }
 }
