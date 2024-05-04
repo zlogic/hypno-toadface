@@ -109,7 +109,7 @@ impl Gpu {
             let device = ScopeRollback::new(device, |device| device.destroy_device(None));
 
             let swapchain_loader = khr::swapchain::Device::new(instance.borrow(), device.borrow());
-            let (swapchain, images_count) = Gpu::create_swapchain(
+            let swapchain = Gpu::create_swapchain(
                 &surface_loader,
                 &swapchain_loader,
                 physical_device,
@@ -120,6 +120,7 @@ impl Gpu {
             let swapchain = ScopeRollback::new(swapchain, |swapchain| {
                 swapchain_loader.destroy_swapchain(swapchain, None)
             });
+            let swapchain_images = swapchain_loader.get_swapchain_images(*swapchain.borrow())?;
 
             let renderpass = Gpu::create_renderpass(device.borrow())?;
             let renderpass = ScopeRollback::new(renderpass, |renderpass| {
@@ -130,7 +131,7 @@ impl Gpu {
                 device.borrow(),
                 display_dimensions,
                 *renderpass.borrow(),
-                images_count as u32,
+                swapchain_images.len() as u32,
             )?;
             let control = Gpu::create_control(device.borrow(), graphics_queue)?;
             let control = ScopeRollback::new(control, |control| control.destroy(device.borrow()));
@@ -140,10 +141,9 @@ impl Gpu {
                 instance.get_physical_device_memory_properties(physical_device)
             };
             let images = Gpu::create_image_buffers(
-                &swapchain_loader,
                 device.borrow(),
+                swapchain_images,
                 &memory_properties,
-                *swapchain.borrow(),
                 *renderpass.borrow(),
                 {
                     let control: &Control = control.borrow();
@@ -233,7 +233,7 @@ impl Gpu {
                 };
                 Some((device, device_name, queue_index, score))
             })
-            .max_by(|(_, _, _, a), (_, _, _, b)| a.cmp(&b));
+            .max_by(|(_, _, _, a), (_, _, _, b)| a.cmp(b));
         let (device, name, queue_index) = if let Some((device, name, queue_index, _score)) = device
         {
             (device, name, queue_index)
@@ -354,7 +354,7 @@ impl Gpu {
         graphics_queue_index: u32,
         surface: vk::SurfaceKHR,
         dimensions: DisplayDimensions,
-    ) -> Result<(vk::SwapchainKHR, usize), GpuError> {
+    ) -> Result<vk::SwapchainKHR, GpuError> {
         let surface_capabilities =
             surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?;
         if !surface_capabilities
@@ -420,9 +420,7 @@ impl Gpu {
             .clipped(true)
             .present_mode(present_mode);
 
-        let swapchain = swapchain_loader.create_swapchain(&swapchain_create_info, None)?;
-        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
-        Ok((swapchain, swapchain_images.len()))
+        Ok(swapchain_loader.create_swapchain(&swapchain_create_info, None)?)
     }
 
     unsafe fn create_renderpass(device: &ash::Device) -> Result<vk::RenderPass, vk::Result> {
@@ -625,21 +623,19 @@ impl Gpu {
     }
 
     unsafe fn create_image_buffers(
-        swapchain_loader: &khr::swapchain::Device,
         device: &ash::Device,
+        swapchain_images: Vec<vk::Image>,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        swapchain: vk::SwapchainKHR,
         renderpass: vk::RenderPass,
         command_pool: vk::CommandPool,
         dimensions: DisplayDimensions,
         pipeline: &Pipeline,
     ) -> Result<Vec<ImageBuffer>, GpuError> {
-        let swapchain_images = swapchain_loader.get_swapchain_images(swapchain)?;
         let mut images = vec![];
         for image in swapchain_images {
             let image = Gpu::create_image_buffer(
-                &device,
-                &memory_properties,
+                device,
+                memory_properties,
                 image,
                 renderpass,
                 command_pool,
@@ -708,7 +704,7 @@ impl Gpu {
         });
 
         let param_buffer: Buffer<ShaderParams> =
-            Gpu::create_buffer::<ShaderParams>(&device, &memory_properties, &pipeline)?;
+            Gpu::create_buffer::<ShaderParams>(device, memory_properties, pipeline)?;
         Ok(ImageBuffer {
             view: view.consume(),
             framebuffer: framebuffer.consume(),
@@ -850,7 +846,7 @@ impl Gpu {
             vk::CommandBufferResetFlags::RELEASE_RESOURCES,
         )?;
 
-        self.copy_buffer_data(&image, scene)?;
+        self.copy_buffer_data(image, scene)?;
 
         let info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1059,7 +1055,7 @@ where
     F: FnOnce(T),
 {
     fn borrow(&self) -> &T {
-        &self.val.as_ref().unwrap()
+        self.val.as_ref().unwrap()
     }
 }
 
@@ -1069,34 +1065,36 @@ where
 {
     fn drop(&mut self) {
         if let Some(val) = self.val.take() {
-            self.rollback.take().map(|rb| rb(val));
+            if let Some(rb) = self.rollback.take() {
+                rb(val)
+            }
         }
     }
 }
 
 #[derive(Debug)]
 pub enum GpuError {
-    InternalError(String),
-    LoadingError(ash::LoadingError),
-    VkError(String, vk::Result),
-    IoError(io::Error),
+    Internal(String),
+    Loading(ash::LoadingError),
+    Vk(String, vk::Result),
+    Io(io::Error),
 }
 
 impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            GpuError::InternalError(ref msg) => f.write_str(msg),
-            GpuError::LoadingError(ref e) => {
+            GpuError::Internal(ref msg) => f.write_str(msg),
+            GpuError::Loading(ref e) => {
                 write!(f, "Failed to init GPU: {}", e)
             }
-            GpuError::VkError(ref msg, ref e) => {
+            GpuError::Vk(ref msg, ref e) => {
                 if !msg.is_empty() {
                     write!(f, "Vulkan error: {} ({})", msg, e)
                 } else {
                     write!(f, "Vulkan error: {}", e)
                 }
             }
-            GpuError::IoError(ref e) => {
+            GpuError::Io(ref e) => {
                 write!(f, "IO error: {}", e)
             }
         }
@@ -1106,40 +1104,40 @@ impl fmt::Display for GpuError {
 impl error::Error for GpuError {
     fn cause(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
-            GpuError::InternalError(ref _msg) => None,
-            GpuError::LoadingError(ref e) => Some(e),
-            GpuError::VkError(_, ref e) => Some(e),
-            GpuError::IoError(ref e) => Some(e),
+            GpuError::Internal(ref _msg) => None,
+            GpuError::Loading(ref e) => Some(e),
+            GpuError::Vk(_, ref e) => Some(e),
+            GpuError::Io(ref e) => Some(e),
         }
     }
 }
 
 impl From<ash::LoadingError> for GpuError {
     fn from(err: ash::LoadingError) -> GpuError {
-        GpuError::LoadingError(err)
+        GpuError::Loading(err)
     }
 }
 
 impl From<vk::Result> for GpuError {
     fn from(err: vk::Result) -> GpuError {
-        GpuError::VkError("".into(), err)
+        GpuError::Vk("".into(), err)
     }
 }
 
 impl From<(&str, vk::Result)> for GpuError {
     fn from(e: (&str, vk::Result)) -> GpuError {
-        GpuError::VkError(e.0.to_string(), e.1)
+        GpuError::Vk(e.0.to_string(), e.1)
     }
 }
 
 impl From<io::Error> for GpuError {
     fn from(err: io::Error) -> GpuError {
-        GpuError::IoError(err)
+        GpuError::Io(err)
     }
 }
 
 impl From<&str> for GpuError {
     fn from(msg: &str) -> GpuError {
-        GpuError::InternalError(msg.to_string())
+        GpuError::Internal(msg.to_string())
     }
 }
