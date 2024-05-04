@@ -212,7 +212,11 @@ impl Gpu {
             .filter_map(|device| {
                 let device = *device;
                 let props = instance.get_physical_device_properties(device);
-                // TODO: check UBO props.limits.max_uniform_buffer_range
+                if props.limits.max_uniform_buffer_range
+                    < std::mem::size_of::<ShaderParams>() as u32
+                {
+                    return None;
+                }
                 let queue_index = Gpu::find_graphics_queue(instance, device)?;
 
                 let device_name = props
@@ -814,12 +818,9 @@ impl Gpu {
 
     unsafe fn copy_buffer_data(
         &self,
-        image_index: usize,
+        image: &ImageBuffer,
         scene: &graphics::Scene,
     ) -> Result<(), vk::Result> {
-        // TODO: panic if index is out of range?
-        // TODO: probably a good idea to wrap this in the Buffer.
-        let buffer = &self.images[image_index].param_buffer;
         let timecode = scene.timecode / 100.0;
         let timecode = timecode - timecode.floor();
         let width = self.display_dimensions.width as f32 / 2.0;
@@ -831,25 +832,14 @@ impl Gpu {
             _height: height,
             _max_distance: max_distance,
         };
-        buffer.mapped_memory.write(params);
-
-        if buffer.host_coherent {
-            return Ok(());
-        };
-        let flush_memory_ranges = vk::MappedMemoryRange::default()
-            .memory(buffer.buffer_memory)
-            .offset(0)
-            .size(std::mem::size_of::<ShaderParams>() as u64);
-        self.device
-            .flush_mapped_memory_ranges(&[flush_memory_ranges])
+        image.param_buffer.write(&self.device, params)
     }
 
     unsafe fn render_image(
         &self,
+        image: &ImageBuffer,
         scene: &graphics::Scene,
-        image_index: usize,
-    ) -> Result<(), vk::Result> {
-        let image = &self.images[image_index as usize];
+    ) -> Result<(), GpuError> {
         let command_buffer = image.command_buffer;
 
         self.device
@@ -860,7 +850,7 @@ impl Gpu {
             vk::CommandBufferResetFlags::RELEASE_RESOURCES,
         )?;
 
-        self.copy_buffer_data(image_index as usize, scene)?;
+        self.copy_buffer_data(&image, scene)?;
 
         let info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -917,7 +907,8 @@ impl Gpu {
             .wait_dst_stage_mask(&wait_dst_stage_mask);
 
         self.device
-            .queue_submit(self.control.queue, &[queue_submit_info], self.control.fence)
+            .queue_submit(self.control.queue, &[queue_submit_info], self.control.fence)?;
+        Ok(())
     }
 
     pub fn render(&self, scene: &graphics::Scene) -> Result<RenderFeedback, GpuError> {
@@ -929,7 +920,11 @@ impl Gpu {
                 vk::Fence::null(),
             )?;
 
-            self.render_image(scene, image_index as usize)?;
+            if image_index as usize >= self.images.len() {
+                return Err("Swapchain requested image {}, outside of range".into());
+            }
+            let image = &self.images[image_index as usize];
+            self.render_image(image, scene)?;
 
             let swapchains = [self.swapchain];
             let image_indices = [image_index];
@@ -983,6 +978,20 @@ impl Control {
 }
 
 impl<T> Buffer<T> {
+    unsafe fn write(&self, device: &ash::Device, val: T) -> Result<(), vk::Result> {
+        self.mapped_memory.write(val);
+
+        if self.host_coherent {
+            return Ok(());
+        };
+        let flush_memory_ranges = vk::MappedMemoryRange::default()
+            .memory(self.buffer_memory)
+            .offset(0)
+            .size(std::mem::size_of::<T>() as u64);
+        device.flush_mapped_memory_ranges(&[flush_memory_ranges])?;
+        Ok(())
+    }
+
     unsafe fn destroy(&self, device: &ash::Device, descriptor_pool: vk::DescriptorPool) {
         let _ = device.free_descriptor_sets(descriptor_pool, &[self.descriptor_set]);
         device.unmap_memory(self.buffer_memory);
