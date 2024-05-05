@@ -11,6 +11,8 @@ rust-version = "1.77"
 
 [dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
+rustix = { version = "0.38", default-features = false }
+libc = { version = "*" }
 
 [profile.release]
 strip = true

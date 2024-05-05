@@ -7,6 +7,7 @@ use crate::graphics::Scene;
 
 mod gpu;
 mod graphics;
+mod sighandler;
 
 const ANIMATION_SPEED: f64 = 4.0 / 100.0;
 
@@ -18,7 +19,13 @@ fn main() {
     let start = Instant::now();
     let mut framecounter_start = Instant::now();
     let mut framecounter_frames = 0usize;
+    unsafe {
+        sighandler::listen_to_sigint();
+    }
     loop {
+        if sighandler::stop_requested() {
+            break;
+        }
         let scene = Scene {
             timecode: start.elapsed().as_secs_f64() * ANIMATION_SPEED,
         };
@@ -49,4 +56,6 @@ fn main() {
             framecounter_start = Instant::now();
         }
     }
+    drop(renderer);
+    println!("\nGoodbye.");
 }
