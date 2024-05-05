@@ -8,6 +8,8 @@ use crate::graphics::Scene;
 mod gpu;
 mod graphics;
 
+const ANIMATION_SPEED: f64 = 4.0 / 100.0;
+
 fn main() {
     let renderer = gpu::Gpu::init().expect("Failed to init GPU");
 
@@ -18,7 +20,7 @@ fn main() {
     let mut framecounter_frames = 0usize;
     loop {
         let scene = Scene {
-            timecode: start.elapsed().as_secs_f64() * 4.0,
+            timecode: start.elapsed().as_secs_f64() * ANIMATION_SPEED,
         };
 
         let result = match renderer.render(&scene) {

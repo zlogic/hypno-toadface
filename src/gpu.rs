@@ -817,8 +817,7 @@ impl Gpu {
         image: &ImageBuffer,
         scene: &graphics::Scene,
     ) -> Result<(), vk::Result> {
-        let timecode = scene.timecode / 100.0;
-        let timecode = timecode - timecode.floor();
+        let timecode = scene.timecode - scene.timecode.floor();
         let width = self.display_dimensions.width as f32 / 2.0;
         let height = self.display_dimensions.height as f32 / 2.0;
         let max_distance = width * width + height * height;

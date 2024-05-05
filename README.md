@@ -1,6 +1,6 @@
 # Hypno Toadface
 
-This is a weekend project, attempting to display some graphics using Linux DRM (Direct Rendering Manager).
+This is a weekend project, attempting to display some graphics using Linux ~DRM (Direct Rendering Manager)~ Vulkan's `VK_KHR_surface` and `VK_KHR_display` extensions.
 
 ## Why?
 
@@ -19,6 +19,8 @@ Build and run as a regular Rust project:
 ```shell
 ./hypno-toadface
 ```
+
+⚠️ This project works without a windowing manager, but in Linux only one device can have exclusive access to the GPU. If X or Wayland is running, using the GPU would be impossible. To run this project, stop any windowing managers.
 
 As accessing displays requires elevated privileges, the safest way to get them is by adding a user to the `video` group:
 
