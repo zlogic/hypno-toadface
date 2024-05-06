@@ -15,7 +15,7 @@ pub struct Player {
 }
 
 const SAMPLING_FREQUENCY: u32 = 48000;
-const SAMPLE_SECONDS: u32 = 16;
+const SAMPLE_SECONDS: u32 = 8;
 const CHANNELS: u32 = 2;
 
 impl Player {
@@ -52,9 +52,9 @@ impl Device {
 
     unsafe fn set_params(&self) -> Result<(), io::Error> {
         let mut params = alsa::Params::new();
-        params.rmask = 0xffffffff;
+        //params.rmask = 0xffffffff;
         params.cmask = 0;
-        params.info = 0xffffffff;
+        //params.info = 0xffffffff;
 
         // Setting an unsupported format might cause device to refuse ioctl.
         let format = 2; // SNDRV_PCM_FORMAT_S16_LE
@@ -84,13 +84,15 @@ impl Device {
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_SUBFORMAT, 0, false, false);
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_ACCESS, access, false, false);
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_FORMAT, format, false, false);
+        /*
         ioctl::ioctl(
             &self.file,
             ioctl::Updater::<alsa::IoCtlRefine, alsa::Params>::new(&mut params),
         )?;
+        */
 
         // params.info |= 0x80000000;
-        params.msbits = sample_length * 8;
+        // params.msbits = sample_length * 8;
         ioctl::ioctl(
             &self.file,
             ioctl::Updater::<alsa::IoCtlHwParams, alsa::Params>::new(&mut params),
@@ -107,9 +109,9 @@ impl Device {
         let mut buffer = vec![0i16; (SAMPLING_FREQUENCY * CHANNELS * SAMPLE_SECONDS) as usize];
         generator.fill(buffer.as_mut_slice());
 
-        // TODO: allow to push/rotate buffers and change the sound?
-        let mut bq_left = Biquad::new(100.0, 0.9);
-        let mut bq_right = Biquad::new(100.0, 0.9);
+        // TODO: keep original noise intact, but keep applying biquad filter (continuous sound)
+        let mut bq_left = Biquad::new(70.0, 3.0, 4.0);
+        let mut bq_right = Biquad::new(70.0, 3.0, 4.0);
         for i in (0..buffer.len()).step_by(2) {
             buffer[i] = bq_left.process(buffer[i]);
             buffer[i + 1] = bq_right.process(buffer[i + 1]);
@@ -121,7 +123,9 @@ impl Device {
     unsafe fn play_loop(&self, shutdown_chan: mpsc::Receiver<()>) -> Result<(), io::Error> {
         let noise_buffer = Device::generate_noise();
         let mut i = 0usize;
-        let i_mult = SAMPLING_FREQUENCY as usize * 2;
+        // TODO: allow to push/rotate buffers and change the sound, instead of looping
+        // through the same buffer.
+        let i_mult = SAMPLING_FREQUENCY as usize / 16;
         let i_max = noise_buffer.len() / i_mult;
         loop {
             match shutdown_chan.try_recv() {
@@ -133,8 +137,11 @@ impl Device {
                 }
                 _ => {}
             }
-            i = i % i_max;
+            if i + 1 > i_max {
+                i = 0;
+            }
             let noise_slice = &noise_buffer[i_mult * i..i_mult * (i + 1)];
+            i += 1;
             let submit = alsa::SubmitBuffer::new(noise_slice);
             ioctl::ioctl(
                 &self.file,
@@ -154,6 +161,7 @@ struct Biquad {
     x1: f32,
     x2: f32,
 
+    multiplier: f32,
     a1: f32,
     a2: f32,
     b0: f32,
@@ -162,7 +170,7 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn new(lowpass_frequency: f32, q: f32) -> Biquad {
+    fn new(lowpass_frequency: f32, q: f32, multiplier: f32) -> Biquad {
         let omega = 2.0 * std::f32::consts::PI * (lowpass_frequency / SAMPLING_FREQUENCY as f32);
         let omega_s = omega.sin();
         let omega_c = omega.cos();
@@ -180,6 +188,7 @@ impl Biquad {
             y2: 0.0,
             x1: 0.0,
             x2: 0.0,
+            multiplier,
             a1: a1 / a0,
             a2: a2 / a0,
             b0: b0 / a0,
@@ -199,7 +208,7 @@ impl Biquad {
         self.y2 = self.y1;
         self.y1 = out;
 
-        let out = out * (i16::MAX as f32);
+        let out = out * self.multiplier * (i16::MAX as f32);
 
         out.clamp(i16::MIN as f32, i16::MAX as f32) as i16
     }
@@ -224,6 +233,8 @@ mod alsa {
     use libc::c_void;
     use rustix::ioctl;
     use std::array;
+
+    use super::CHANNELS;
 
     pub const SNDRV_PCM_HW_PARAM_ACCESS: usize = 0;
     pub const SNDRV_PCM_HW_PARAM_FORMAT: usize = 1;
@@ -318,8 +329,8 @@ mod alsa {
                 // TODO: provide a better option to toggle flags on/off?
                 (*dst) |= 1u32 << offset;
             }
-            //self.rmask |= 1 << param;
-            self.cmask |= 1 << param;
+            self.rmask |= 1 << param;
+            //self.cmask |= 1 << param;
         }
     }
 
@@ -335,12 +346,12 @@ mod alsa {
             SubmitBuffer {
                 result: 0,
                 buffer: data.as_ptr() as *const c_void,
-                num_frames: data.len() as u64,
+                num_frames: data.len() as u64 / CHANNELS as u64,
             }
         }
     }
 
-    pub type IoCtlRefine = ioctl::ReadWriteOpcode<b'A', 0x10, Params>;
+    // pub type IoCtlRefine = ioctl::ReadWriteOpcode<b'A', 0x10, Params>;
     pub type IoCtlHwParams = ioctl::ReadWriteOpcode<b'A', 0x11, Params>;
     pub type IoCtlPrepare = ioctl::NoneOpcode<b'A', 0x40, ()>;
     // pub type IoCtlStart = ioctl::NoneOpcode<b'A', 0x42, ()>;
