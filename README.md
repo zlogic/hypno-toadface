@@ -27,7 +27,8 @@ As accessing displays requires elevated privileges, the safest way to get them i
 ```shell
 # Required for CoreOS with a sparse /etc/group
 getent group video >> /etc/group
-usermod -a -G video $USERNAME
+getent group audio >> /etc/group
+usermod -a -G video,audio $USERNAME
 ```
 
 If SELinux is enabled, make sure that `/etc/group` has the right label by running `ls -Z /etc/group`, it should look something like this:

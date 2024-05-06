@@ -65,11 +65,12 @@ struct ImageBuffer {
     param_buffer: Buffer<ShaderParams>,
 }
 
+#[repr(C)]
 struct ShaderParams {
-    _timecode: f32,
-    _width: f32,
-    _height: f32,
-    _max_distance: f32,
+    timecode: f32,
+    width: f32,
+    height: f32,
+    max_distance: f32,
 }
 
 pub struct RenderFeedback {
@@ -822,10 +823,10 @@ impl Gpu {
         let height = self.display_dimensions.height as f32 / 2.0;
         let max_distance = width * width + height * height;
         let params = ShaderParams {
-            _timecode: timecode as f32,
-            _width: width,
-            _height: height,
-            _max_distance: max_distance,
+            timecode: timecode as f32,
+            width,
+            height,
+            max_distance,
         };
         image.param_buffer.write(&self.device, params)
     }

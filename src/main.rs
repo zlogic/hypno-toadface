@@ -1,6 +1,7 @@
 use std::{
     io::{self, Write},
-    time::Instant,
+    thread,
+    time::{self, Instant},
 };
 
 use crate::graphics::Scene;
@@ -8,13 +9,18 @@ use crate::graphics::Scene;
 mod gpu;
 mod graphics;
 mod sighandler;
+mod sound;
 
+// TODO: make this configurable.
 const ANIMATION_SPEED: f64 = 4.0 / 100.0;
+// TODO: make this configurable.
+const SOUND_DEVICE: &str = "/dev/snd/pcmC0D3p";
 
 fn main() {
     let renderer = gpu::Gpu::init().expect("Failed to init GPU");
+    let player = sound::Player::new(SOUND_DEVICE).expect("Failed to init audio device");
 
-    println!("Using device: {}", renderer.device_name());
+    println!("Using video device: {}", renderer.device_name());
 
     let start = Instant::now();
     let mut framecounter_start = Instant::now();
@@ -57,5 +63,9 @@ fn main() {
         }
     }
     drop(renderer);
+    drop(player);
+
     println!("\nGoodbye.");
+    // TODO: remove this code
+    thread::sleep(time::Duration::from_secs(5));
 }
