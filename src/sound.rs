@@ -238,7 +238,7 @@ impl Biquad {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        if let Err(_) = self.shutdown_chan.send(()) {
+        if self.shutdown_chan.send(()).is_err() {
             return;
         }
         if let Some(join_handle) = self.join_handle.take() {
@@ -284,10 +284,10 @@ mod alsa {
     pub struct Params {
         pub flags: u32,
         pub masks: [SoundMask;
-            (SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK + 1) as usize],
+            SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK + 1],
         _masks_reserved: [SoundMask; 5],
         pub intervals: [SoundInterval;
-            (SNDRV_PCM_HW_PARAM_LAST_INTERVAL - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + 1) as usize],
+            SNDRV_PCM_HW_PARAM_LAST_INTERVAL - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + 1],
         _intervals_reserved: [SoundInterval; 9],
         pub rmask: u32,
         pub cmask: u32,
@@ -356,7 +356,7 @@ mod alsa {
     }
 
     impl SubmitBuffer {
-        pub fn new<'a>(data: &'a [i16]) -> SubmitBuffer {
+        pub fn new(data: &[i16]) -> SubmitBuffer {
             SubmitBuffer {
                 result: 0,
                 buffer: data.as_ptr() as *const c_void,
