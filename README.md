@@ -2,6 +2,8 @@
 
 This is a weekend project, attempting to display some graphics using Linux ~DRM (Direct Rendering Manager)~ Vulkan's `VK_KHR_surface` and `VK_KHR_display` extensions.
 
+In addition, it can also play audio using the ALSA API, without an audio server - using kernel ioctls.
+
 ## Why?
 
 Do something cool with a headless server that has HDMI output and barebones CoreOS.
@@ -39,8 +41,12 @@ system_u:object_r:passwd_file_t:s0 /etc/group
 
 ## References:
 
-* [Excellent tutorial on using Vulkan](https://vulkan-tutorial.com)
-* [A similar project](https://github.com/astefanutti/kms-glsl)
-* [Collection of really impressive shaders](https://www.shadertoy.com/)
+* [Vulkan Tutorial](https://vulkan-tutorial.com) - an Excellent tutorial on using Vulkan
+* [KMS GLSL](https://github.com/astefanutti/kms-glsl) - a similar project, but using DRM/KMS
+* [Shadertoy](https://www.shadertoy.com) - a collection of really impressive shaders
+* [Raw ALSA player](https://github.com/PHJArea217/raw-alsa-player) - a pure C example how to play audio without an audioserver
+* [Generating pink noise](https://www.firstpr.com.au/dsp/pink-noise/)
+* [Colored noise generator](https://mynoise.net/NoiseMachines/whiteNoiseGenerator.php) - a neat noise generator with a lot of fine tuning
+* [Biquad calculator](https://www.earlevel.com/main/2021/09/02/biquad-calculator-v3/) - showing a frequency response graph for a biquad filter
 
 ALL GLORY TO THE HYPNOTOAD
