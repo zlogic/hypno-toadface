@@ -1,7 +1,6 @@
 use std::{
     io::{self, Write},
-    thread,
-    time::{self, Instant},
+    time::Instant,
 };
 
 use crate::graphics::Scene;
@@ -66,6 +65,4 @@ fn main() {
     drop(player);
 
     println!("\nGoodbye.");
-    // TODO: remove this code
-    thread::sleep(time::Duration::from_secs(5));
 }

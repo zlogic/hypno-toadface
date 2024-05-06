@@ -1,6 +1,7 @@
 use std::{
+    array, error, fmt,
     fs::{File, OpenOptions},
-    io,
+    io, mem,
     sync::mpsc,
     thread,
 };
@@ -10,16 +11,17 @@ use rand::prelude::*;
 use rustix::ioctl;
 
 pub struct Player {
-    join_handle: Option<thread::JoinHandle<()>>,
+    join_handle: Option<thread::JoinHandle<Result<(), SoundError>>>,
     shutdown_chan: mpsc::Sender<()>,
 }
 
 const SAMPLING_FREQUENCY: u32 = 48000;
-const SAMPLE_SECONDS: u32 = 8;
+const SAMPLE_SECONDS: u32 = 2;
 const CHANNELS: u32 = 2;
 const BIQUAD_LOWPASS_CENTER_FREQUENCY: f32 = 70.0;
 const BIQUAD_LOWPASS_Q_FACTOR: f32 = 3.0;
 const BIQUAD_MULTIPLICATION: f32 = 4.0;
+const NOISE_SAMPLES: usize = (SAMPLING_FREQUENCY * CHANNELS * SAMPLE_SECONDS) as usize;
 
 impl Player {
     pub fn new(filename: &str) -> Result<Player, io::Error> {
@@ -31,7 +33,8 @@ impl Player {
 
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
         let join_handle = thread::spawn(move || unsafe {
-            let _ = device.play_loop(shutdown_receiver);
+            let mut device = device;
+            device.play_loop(shutdown_receiver)
         });
         Ok(Player {
             join_handle: Some(join_handle),
@@ -97,38 +100,21 @@ impl Device {
         Ok(())
     }
 
-    fn generate_noise() -> Vec<i16> {
-        let mut generator = rand::thread_rng();
-
-        let mut buffer = vec![0i16; (SAMPLING_FREQUENCY * CHANNELS * SAMPLE_SECONDS) as usize];
-        generator.fill(buffer.as_mut_slice());
-
-        // TODO: keep original noise intact, but keep applying biquad filter (continuous sound)
-        let mut bq_left = Biquad::new(
-            BIQUAD_LOWPASS_CENTER_FREQUENCY,
-            BIQUAD_LOWPASS_Q_FACTOR,
-            BIQUAD_MULTIPLICATION,
-        );
-        let mut bq_right = Biquad::new(
-            BIQUAD_LOWPASS_CENTER_FREQUENCY,
-            BIQUAD_LOWPASS_Q_FACTOR,
-            BIQUAD_MULTIPLICATION,
-        );
-        for i in (0..buffer.len()).step_by(2) {
-            buffer[i] = bq_left.process(buffer[i]);
-            buffer[i + 1] = bq_right.process(buffer[i + 1]);
-        }
-
-        buffer
-    }
-
-    unsafe fn play_loop(&self, shutdown_chan: mpsc::Receiver<()>) -> Result<(), io::Error> {
-        let noise_buffer = Device::generate_noise();
-        let mut i = 0usize;
-        // TODO: allow to push/rotate buffers and change the sound, instead of looping
-        // through the same buffer.
-        let i_mult = SAMPLING_FREQUENCY as usize / 16;
-        let i_max = noise_buffer.len() / i_mult;
+    unsafe fn play_loop(&mut self, shutdown_chan: mpsc::Receiver<()>) -> Result<(), SoundError> {
+        // This loop will non-blockingly check if a new buffer is available and switch to using it.
+        // The used buffer will be send to the generator, so that it can fill it with fresh data;
+        // otherwise, keep playing the current buffer in a loop.
+        let (new_buffer_requester, empty_buffer_receiver) = mpsc::channel();
+        let (full_buffer_sender, full_buffer_receiver) = mpsc::channel();
+        let generator_join_handle = thread::spawn(move || {
+            Device::generator_loop(empty_buffer_receiver, full_buffer_sender)
+        });
+        // Prefill the buffer queue with a few empty buffers.
+        (0..3).for_each(|_| {
+            let _ = new_buffer_requester.send(vec![0i16; NOISE_SAMPLES]);
+        });
+        // Wait until first buffer is available.
+        let mut noise_samples = full_buffer_receiver.recv()?;
         loop {
             match shutdown_chan.try_recv() {
                 Ok(_) => {
@@ -139,21 +125,60 @@ impl Device {
                 }
                 _ => {}
             }
-            if i + 1 > i_max {
-                i = 0;
+            match full_buffer_receiver.try_recv() {
+                Ok(new_buffer) => {
+                    let mut new_buffer = new_buffer;
+                    mem::swap(&mut new_buffer, &mut noise_samples);
+                    let _ = new_buffer_requester.send(new_buffer);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    break;
+                }
             }
-            let noise_slice = &noise_buffer[i_mult * i..i_mult * (i + 1)];
-            i += 1;
-            let submit = alsa::SubmitBuffer::new(noise_slice);
+
+            let submit = alsa::SubmitBuffer::new(noise_samples.as_slice());
             ioctl::ioctl(
                 &self.file,
                 ioctl::Setter::<alsa::IoCtlWriteiFrames, _>::new(submit),
             )?;
         }
+        drop(new_buffer_requester);
+        drop(full_buffer_receiver);
+        let _ = generator_join_handle.join();
 
         ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrain>::new())?;
         ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrop>::new())?;
         Ok(())
+    }
+
+    fn generator_loop(
+        empty_buffers_chan: mpsc::Receiver<Vec<i16>>,
+        full_buffers_chan: mpsc::Sender<Vec<i16>>,
+    ) -> Result<(), mpsc::RecvError> {
+        // Use the same noise sample for filtering.
+        // Biquads are stateful and playing the same fragment in a loop
+        // will cause popping or crackling noise.
+        let source_samples = {
+            let mut rng = rand::thread_rng();
+            (0..NOISE_SAMPLES)
+                .map(|_| rng.gen_range(-1.0..1.0))
+                .collect::<Vec<_>>()
+        };
+        let mut biquads: [Biquad; CHANNELS as usize] = array::from_fn(|_| {
+            Biquad::new(BIQUAD_LOWPASS_CENTER_FREQUENCY, BIQUAD_LOWPASS_Q_FACTOR)
+        });
+        let biquad_multiplication: f32 = BIQUAD_MULTIPLICATION * (i16::MAX as f32);
+
+        loop {
+            let mut noise_dest = empty_buffers_chan.recv()?;
+            noise_dest.iter_mut().enumerate().for_each(|(i, dest)| {
+                let biquad = &mut biquads[i % (CHANNELS as usize)];
+                let out = biquad.process(source_samples[i]) * biquad_multiplication;
+                *dest = out.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            });
+            let _ = full_buffers_chan.send(noise_dest);
+        }
     }
 }
 
@@ -163,7 +188,6 @@ struct Biquad {
     x1: f32,
     x2: f32,
 
-    multiplier: f32,
     a1: f32,
     a2: f32,
     b0: f32,
@@ -172,7 +196,7 @@ struct Biquad {
 }
 
 impl Biquad {
-    fn new(lowpass_frequency: f32, q: f32, multiplier: f32) -> Biquad {
+    fn new(lowpass_frequency: f32, q: f32) -> Biquad {
         let omega = 2.0 * std::f32::consts::PI * (lowpass_frequency / SAMPLING_FREQUENCY as f32);
         let omega_s = omega.sin();
         let omega_c = omega.cos();
@@ -190,7 +214,6 @@ impl Biquad {
             y2: 0.0,
             x1: 0.0,
             x2: 0.0,
-            multiplier,
             a1: a1 / a0,
             a2: a2 / a0,
             b0: b0 / a0,
@@ -199,8 +222,7 @@ impl Biquad {
         }
     }
 
-    fn process(&mut self, val: i16) -> i16 {
-        let val = val as f32 / i16::MAX as f32;
+    fn process(&mut self, val: f32) -> f32 {
         // Biquad Direct Form 1
         let out = self.b0 * val + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
@@ -210,9 +232,7 @@ impl Biquad {
         self.y2 = self.y1;
         self.y1 = out;
 
-        let out = out * self.multiplier * (i16::MAX as f32);
-
-        out.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        out
     }
 }
 
@@ -350,4 +370,55 @@ mod alsa {
     pub type IoCtlDrop = ioctl::NoneOpcode<b'A', 0x43, ()>;
     pub type IoCtlDrain = ioctl::NoneOpcode<b'A', 0x44, ()>;
     pub type IoCtlWriteiFrames<'a> = ioctl::WriteOpcode<b'A', 0x50, SubmitBuffer>;
+}
+
+#[derive(Debug)]
+pub enum SoundError {
+    Recv(mpsc::RecvError),
+    Io(io::Error),
+    Ioctl(rustix::io::Errno),
+}
+
+impl fmt::Display for SoundError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            SoundError::Recv(ref e) => {
+                write!(f, "Receive error: {}", e)
+            }
+            SoundError::Io(ref e) => {
+                write!(f, "IO error: {}", e)
+            }
+            SoundError::Ioctl(ref e) => {
+                write!(f, "IOCTL error: {}", e)
+            }
+        }
+    }
+}
+
+impl error::Error for SoundError {
+    fn cause(&self) -> Option<&(dyn error::Error + 'static)> {
+        match *self {
+            SoundError::Recv(ref e) => Some(e),
+            SoundError::Io(ref e) => Some(e),
+            SoundError::Ioctl(ref e) => Some(e),
+        }
+    }
+}
+
+impl From<mpsc::RecvError> for SoundError {
+    fn from(err: mpsc::RecvError) -> SoundError {
+        SoundError::Recv(err)
+    }
+}
+
+impl From<io::Error> for SoundError {
+    fn from(err: io::Error) -> SoundError {
+        SoundError::Io(err)
+    }
+}
+
+impl From<rustix::io::Errno> for SoundError {
+    fn from(err: rustix::io::Errno) -> SoundError {
+        SoundError::Ioctl(err)
+    }
 }
