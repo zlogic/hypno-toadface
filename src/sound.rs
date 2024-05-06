@@ -17,6 +17,9 @@ pub struct Player {
 const SAMPLING_FREQUENCY: u32 = 48000;
 const SAMPLE_SECONDS: u32 = 8;
 const CHANNELS: u32 = 2;
+const BIQUAD_LOWPASS_CENTER_FREQUENCY: f32 = 70.0;
+const BIQUAD_LOWPASS_Q_FACTOR: f32 = 3.0;
+const BIQUAD_MULTIPLICATION: f32 = 4.0;
 
 impl Player {
     pub fn new(filename: &str) -> Result<Player, io::Error> {
@@ -52,9 +55,9 @@ impl Device {
 
     unsafe fn set_params(&self) -> Result<(), io::Error> {
         let mut params = alsa::Params::new();
-        //params.rmask = 0xffffffff;
+        params.rmask = 0;
         params.cmask = 0;
-        //params.info = 0xffffffff;
+        params.info = 0;
 
         // Setting an unsupported format might cause device to refuse ioctl.
         let format = 2; // SNDRV_PCM_FORMAT_S16_LE
@@ -84,22 +87,13 @@ impl Device {
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_SUBFORMAT, 0, false, false);
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_ACCESS, access, false, false);
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_FORMAT, format, false, false);
-        /*
-        ioctl::ioctl(
-            &self.file,
-            ioctl::Updater::<alsa::IoCtlRefine, alsa::Params>::new(&mut params),
-        )?;
-        */
 
-        // params.info |= 0x80000000;
-        // params.msbits = sample_length * 8;
         ioctl::ioctl(
             &self.file,
             ioctl::Updater::<alsa::IoCtlHwParams, alsa::Params>::new(&mut params),
         )?;
 
         ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
-        //ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlStart>::new())?;
         Ok(())
     }
 
@@ -110,8 +104,16 @@ impl Device {
         generator.fill(buffer.as_mut_slice());
 
         // TODO: keep original noise intact, but keep applying biquad filter (continuous sound)
-        let mut bq_left = Biquad::new(70.0, 3.0, 4.0);
-        let mut bq_right = Biquad::new(70.0, 3.0, 4.0);
+        let mut bq_left = Biquad::new(
+            BIQUAD_LOWPASS_CENTER_FREQUENCY,
+            BIQUAD_LOWPASS_Q_FACTOR,
+            BIQUAD_MULTIPLICATION,
+        );
+        let mut bq_right = Biquad::new(
+            BIQUAD_LOWPASS_CENTER_FREQUENCY,
+            BIQUAD_LOWPASS_Q_FACTOR,
+            BIQUAD_MULTIPLICATION,
+        );
         for i in (0..buffer.len()).step_by(2) {
             buffer[i] = bq_left.process(buffer[i]);
             buffer[i + 1] = bq_right.process(buffer[i + 1]);
@@ -245,13 +247,6 @@ mod alsa {
     pub const SNDRV_PCM_HW_PARAM_FRAME_BITS: usize = 9;
     pub const SNDRV_PCM_HW_PARAM_CHANNELS: usize = 10;
     pub const SNDRV_PCM_HW_PARAM_RATE: usize = 11;
-    // pub const SNDRV_PCM_HW_PARAM_PERIOD_TIME: usize = 12;
-    // pub const SNDRV_PCM_HW_PARAM_PERIOD_SIZE: usize = 13;
-    // pub const SNDRV_PCM_HW_PARAM_PERIOD_BYTES: usize = 14;
-    // pub const SNDRV_PCM_HW_PARAM_PERIODS: usize = 15;
-    // pub const SNDRV_PCM_HW_PARAM_BUFFER_TIME: usize = 16;
-    // pub const SNDRV_PCM_HW_PARAM_BUFFER_SIZE: usize = 17;
-    // pub const SNDRV_PCM_HW_PARAM_BUFFER_BYTES: usize = 18;
     pub const SNDRV_PCM_HW_PARAM_TICK_TIME: usize = 19;
 
     pub const SNDRV_PCM_HW_PARAM_FIRST_INTERVAL: usize = SNDRV_PCM_HW_PARAM_SAMPLE_BITS;
@@ -330,7 +325,6 @@ mod alsa {
                 (*dst) |= 1u32 << offset;
             }
             self.rmask |= 1 << param;
-            //self.cmask |= 1 << param;
         }
     }
 
@@ -351,10 +345,8 @@ mod alsa {
         }
     }
 
-    // pub type IoCtlRefine = ioctl::ReadWriteOpcode<b'A', 0x10, Params>;
     pub type IoCtlHwParams = ioctl::ReadWriteOpcode<b'A', 0x11, Params>;
     pub type IoCtlPrepare = ioctl::NoneOpcode<b'A', 0x40, ()>;
-    // pub type IoCtlStart = ioctl::NoneOpcode<b'A', 0x42, ()>;
     pub type IoCtlDrop = ioctl::NoneOpcode<b'A', 0x43, ()>;
     pub type IoCtlDrain = ioctl::NoneOpcode<b'A', 0x44, ()>;
     pub type IoCtlWriteiFrames<'a> = ioctl::WriteOpcode<b'A', 0x50, SubmitBuffer>;
