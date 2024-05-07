@@ -138,17 +138,27 @@ impl Device {
             }
 
             let submit = alsa::SubmitBuffer::new(noise_samples.as_slice());
-            ioctl::ioctl(
+            match ioctl::ioctl(
                 &self.file,
                 ioctl::Setter::<alsa::IoCtlWriteiFrames, _>::new(submit),
-            )?;
+            ) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::PIPE) => {
+                    // Buffer underrun occurred, restart device.
+                    ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+                }
+                Err(rustix::io::Errno::INTR) => {
+                    // If interrupted, nothing to do.
+                }
+                Err(err) => {
+                    return Err(err.into());
+                }
+            }
         }
         drop(new_buffer_requester);
         drop(full_buffer_receiver);
         let _ = generator_join_handle.join();
 
-        ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrain>::new())?;
-        ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrop>::new())?;
         Ok(())
     }
 
@@ -243,7 +253,12 @@ impl Drop for Player {
 }
 
 impl Drop for Device {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrain>::new());
+            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrop>::new());
+        }
+    }
 }
 
 mod alsa {
