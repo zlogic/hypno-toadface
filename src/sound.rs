@@ -18,9 +18,9 @@ pub struct Player {
 const SAMPLING_FREQUENCY: u32 = 48000;
 const SAMPLE_SECONDS: u32 = 2;
 const CHANNELS: u32 = 2;
-const BIQUAD_LOWPASS_CENTER_FREQUENCY: f32 = 70.0;
+const BIQUAD_LOWPASS_CENTER_FREQUENCY: f32 = 150.0;
 const BIQUAD_LOWPASS_Q_FACTOR: f32 = 3.0;
-const BIQUAD_MULTIPLICATION: f32 = 4.0;
+const BIQUAD_MULTIPLICATION: f32 = 1.0;
 const NOISE_SAMPLES: usize = (SAMPLING_FREQUENCY * CHANNELS * SAMPLE_SECONDS) as usize;
 
 impl Player {
@@ -156,15 +156,9 @@ impl Device {
         empty_buffers_chan: mpsc::Receiver<Vec<i16>>,
         full_buffers_chan: mpsc::Sender<Vec<i16>>,
     ) -> Result<(), mpsc::RecvError> {
-        // Use the same noise sample for filtering.
         // Biquads are stateful and playing the same fragment in a loop
         // will cause popping or crackling noise.
-        let source_samples = {
-            let mut rng = rand::thread_rng();
-            (0..NOISE_SAMPLES)
-                .map(|_| rng.gen_range(-1.0..1.0))
-                .collect::<Vec<_>>()
-        };
+        let mut rng = rand::thread_rng();
         let mut biquads: [Biquad; CHANNELS as usize] = array::from_fn(|_| {
             Biquad::new(BIQUAD_LOWPASS_CENTER_FREQUENCY, BIQUAD_LOWPASS_Q_FACTOR)
         });
@@ -174,7 +168,8 @@ impl Device {
             let mut noise_dest = empty_buffers_chan.recv()?;
             noise_dest.iter_mut().enumerate().for_each(|(i, dest)| {
                 let biquad = &mut biquads[i % (CHANNELS as usize)];
-                let out = biquad.process(source_samples[i]) * biquad_multiplication;
+                let noise_sample = rng.gen_range(-1.0..1.0);
+                let out = biquad.process(noise_sample) * biquad_multiplication;
                 *dest = out.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
             });
             let _ = full_buffers_chan.send(noise_dest);
@@ -283,8 +278,7 @@ mod alsa {
     #[repr(C)]
     pub struct Params {
         pub flags: u32,
-        pub masks: [SoundMask;
-            SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK + 1],
+        pub masks: [SoundMask; SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK + 1],
         _masks_reserved: [SoundMask; 5],
         pub intervals: [SoundInterval;
             SNDRV_PCM_HW_PARAM_LAST_INTERVAL - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL + 1],
