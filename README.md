@@ -2,9 +2,9 @@
 
 This is a weekend project, attempting to display some graphics using Linux ~DRM (Direct Rendering Manager)~ Vulkan's `VK_KHR_surface` and `VK_KHR_display` extensions.
 
-![Example how it looks on a TV](https://raw.githubusercontent.com/wiki/zlogic/hypno-toadface/Videos/demo.mov)
-
 In addition, it can also play audio using the ALSA API, without an audio server - using kernel ioctls.
+
+https://private-user-images.githubusercontent.com/815726/329274790-d0e75489-da36-4b4d-833d-2f8fc1c69e9d.mov
 
 ## Why?
 
