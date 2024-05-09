@@ -2,6 +2,8 @@
 
 This is a weekend project, attempting to display some graphics using Linux ~DRM (Direct Rendering Manager)~ Vulkan's `VK_KHR_surface` and `VK_KHR_display` extensions.
 
+![Example how it looks on a TV](https://raw.githubusercontent.com/wiki/zlogic/hypno-toadface/Videos/demo.mov)
+
 In addition, it can also play audio using the ALSA API, without an audio server - using kernel ioctls.
 
 ## Why?
@@ -37,6 +39,31 @@ If SELinux is enabled, make sure that `/etc/group` has the right label by runnin
 
 ```
 system_u:object_r:passwd_file_t:s0 /etc/group
+```
+
+## Run as a systemd service
+
+Create a systemd unit file:
+
+```shell
+cat <<EOF > ~/.config/systemd/user/hypno-toadface.service
+[Unit]
+Description=Hypno Toadface
+
+[Service]
+Type=exec
+ExecStart=/var/home/core/.local/bin/hypno-toadface
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+and start it without logging in:
+
+```shell
+sudo loginctl enable-linger $USER
 ```
 
 ## References:
