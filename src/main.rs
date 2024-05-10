@@ -71,11 +71,7 @@ fn main() {
 
 fn run_animation(args: Args) {
     let renderer = gpu::Gpu::init().expect("Failed to init GPU");
-    let player = if let Some(path) = args.sound_device {
-        Some(sound::Player::new(&path).expect("Failed to init audio device"))
-    } else {
-        None
-    };
+    let player = args.sound_device.map(|path| sound::Player::new(&path).expect("Failed to init audio device"));
 
     println!("Using video device: {}", renderer.device_name());
 

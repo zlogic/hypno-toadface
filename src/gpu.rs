@@ -724,7 +724,7 @@ impl Gpu {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::DEVICE_LOCAL;
         let usage_flags = vk::BufferUsageFlags::UNIFORM_BUFFER;
         let buffer_create_info = vk::BufferCreateInfo::default()
-            .size(size as u64)
+            .size(size)
             .usage(usage_flags)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buffer = device.create_buffer(&buffer_create_info, None)?;
@@ -772,7 +772,7 @@ impl Gpu {
         let mapped_memory = device.map_memory(
             *buffer_memory.borrow(),
             0,
-            size as u64,
+            size,
             vk::MemoryMapFlags::empty(),
         )?;
         let mapped_memory = mapped_memory as *mut T;
@@ -793,7 +793,7 @@ impl Gpu {
         let buffer_info = vk::DescriptorBufferInfo::default()
             .buffer(*buffer.borrow())
             .offset(0)
-            .range(size as u64);
+            .range(size);
         let buffer_infos = [buffer_info];
         let write_descriptor = vk::WriteDescriptorSet::default()
             .dst_set(*descriptor_set.borrow())
