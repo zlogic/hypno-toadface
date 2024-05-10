@@ -21,12 +21,20 @@ This works well on an off-brand digital signage appliance (NUC) with a Celeron C
 Build and run as a regular Rust project:
 
 ```shell
-./hypno-toadface
+./hypno-toadface [--speed=<speed>]
 ```
+
+```shell
+cybervision [--speed=<speed>] [--sound=<devicepath>]
+```
+
+`--speed=<speed>` is an optional argument to specify how fast the animation should be playing, for example `--speed=0.1`. The default speed is 0.04. Negative values make the animation run in reverse.
+
+`--sound=<devicepath>` specifies a path to the ALSA sound device, for example `--sound=/dev/snd/pcmC0D3p`. If not specified, no sound will be played.
 
 ⚠️ This project works without a windowing manager, but in Linux only one device can have exclusive access to the GPU. If X or Wayland is running, using the GPU would be impossible. To run this project, stop any windowing managers.
 
-As accessing displays requires elevated privileges, the safest way to get them is by adding a user to the `video` group:
+As accessing displays and audio requires elevated privileges, the safest way to get them is by adding a user to the `video` and `audio` groups:
 
 ```shell
 # Required for CoreOS with a sparse /etc/group
