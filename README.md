@@ -21,16 +21,14 @@ This works well on an off-brand digital signage appliance (NUC) with a Celeron C
 Build and run as a regular Rust project:
 
 ```shell
-./hypno-toadface [--speed=<speed>]
-```
-
-```shell
-cybervision [--speed=<speed>] [--sound=<devicepath>]
+./hypno-toadface [--speed=<speed>] [--sound=<devicepath>] [--no-print-fps]
 ```
 
 `--speed=<speed>` is an optional argument to specify how fast the animation should be playing, for example `--speed=0.1`. The default speed is 0.04. Negative values make the animation run in reverse.
 
 `--sound=<devicepath>` specifies a path to the ALSA sound device, for example `--sound=/dev/snd/pcmC0D3p`. If not specified, no sound will be played.
+
+`--no-print-fps` turns off printing the FPS counter.
 
 ⚠️ This project works without a windowing manager, but in Linux only one device can have exclusive access to the GPU. If X or Wayland is running, using the GPU would be impossible. To run this project, stop any windowing managers.
 
@@ -60,7 +58,7 @@ Description=Hypno Toadface
 
 [Service]
 Type=exec
-ExecStart=/var/home/core/.local/bin/hypno-toadface
+ExecStart=/var/home/core/.local/bin/hypno-toadface --no-print-fps --sound=/dev/snd/pcmC0D3p
 KillMode=process
 Restart=on-failure
 
