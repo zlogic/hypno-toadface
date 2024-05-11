@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::ops::Deref;
 use std::{error, fmt, io};
 
 use ash::prelude::VkResult;
@@ -96,58 +96,57 @@ impl Gpu {
             let entry = ash::Entry::load()?;
             let instance = Gpu::init_vk(&entry)?;
             let instance = ScopeRollback::new(instance, |instance| instance.destroy_instance(None));
-            let display_loader = khr::display::Instance::new(&entry, instance.borrow());
-            let surface_loader = khr::surface::Instance::new(&entry, instance.borrow());
+            let display_loader = khr::display::Instance::new(&entry, &instance);
+            let surface_loader = khr::surface::Instance::new(&entry, &instance);
 
-            let (physical_device, device_name, graphics_queue) =
-                Gpu::find_device(instance.borrow())?;
+            let (physical_device, device_name, graphics_queue) = Gpu::find_device(&instance)?;
             let (surface, display_dimensions, display_name) =
                 Gpu::create_display(&display_loader, physical_device)?;
             let surface = ScopeRollback::new(surface, |surface| {
                 surface_loader.destroy_surface(surface, None)
             });
-            let device = Gpu::create_device(instance.borrow(), physical_device, graphics_queue)?;
+            let device = Gpu::create_device(&instance, physical_device, graphics_queue)?;
             let device = ScopeRollback::new(device, |device| device.destroy_device(None));
 
-            let swapchain_loader = khr::swapchain::Device::new(instance.borrow(), device.borrow());
+            let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
             let swapchain = Gpu::create_swapchain(
                 &surface_loader,
                 &swapchain_loader,
                 physical_device,
                 graphics_queue,
-                *surface.borrow(),
+                *surface.deref(),
                 display_dimensions,
             )?;
             let swapchain = ScopeRollback::new(swapchain, |swapchain| {
                 swapchain_loader.destroy_swapchain(swapchain, None)
             });
-            let swapchain_images = swapchain_loader.get_swapchain_images(*swapchain.borrow())?;
+            let swapchain_images = swapchain_loader.get_swapchain_images(*swapchain.deref())?;
 
-            let renderpass = Gpu::create_renderpass(device.borrow())?;
+            let renderpass = Gpu::create_renderpass(&device)?;
             let renderpass = ScopeRollback::new(renderpass, |renderpass| {
-                let device: &ash::Device = device.borrow();
+                let device: &ash::Device = &device;
                 device.destroy_render_pass(renderpass, None)
             });
             let pipeline = Gpu::create_pipeline_layout(
-                device.borrow(),
+                &device,
                 display_dimensions,
-                *renderpass.borrow(),
+                *renderpass.deref(),
                 swapchain_images.len() as u32,
             )?;
-            let control = Gpu::create_control(device.borrow(), graphics_queue)?;
-            let control = ScopeRollback::new(control, |control| control.destroy(device.borrow()));
+            let control = Gpu::create_control(&device, graphics_queue)?;
+            let control = ScopeRollback::new(control, |control| control.destroy(&device));
 
             let memory_properties = {
-                let instance: &ash::Instance = instance.borrow();
+                let instance: &ash::Instance = &instance;
                 instance.get_physical_device_memory_properties(physical_device)
             };
             let images = Gpu::create_image_buffers(
-                device.borrow(),
+                &device,
                 swapchain_images,
                 &memory_properties,
-                *renderpass.borrow(),
+                *renderpass.deref(),
                 {
-                    let control: &Control = control.borrow();
+                    let control: &Control = &control;
                     control.command_pool
                 },
                 display_dimensions,
@@ -476,11 +475,11 @@ impl Gpu {
 
         let shader_stage_create_infos = [
             vk::PipelineShaderStageCreateInfo::default()
-                .module(*vertex_shader_module.borrow())
+                .module(*vertex_shader_module.deref())
                 .name(c"main")
                 .stage(vk::ShaderStageFlags::VERTEX),
             vk::PipelineShaderStageCreateInfo::default()
-                .module(*fragment_shader_module.borrow())
+                .module(*fragment_shader_module.deref())
                 .name(c"main")
                 .stage(vk::ShaderStageFlags::FRAGMENT),
         ];
@@ -554,7 +553,7 @@ impl Gpu {
                 device.destroy_descriptor_set_layout(descriptor_set_layout, None)
             });
 
-        let descriptor_set_layouts = [*descriptor_set_layout.borrow()];
+        let descriptor_set_layouts = [*descriptor_set_layout.deref()];
         let layout_create_info =
             vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
         let layout = device.create_pipeline_layout(&layout_create_info, None)?;
@@ -571,7 +570,7 @@ impl Gpu {
             .multisample_state(&multisample_state_info)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state_info)
-            .layout(*layout.borrow())
+            .layout(*layout.deref())
             .render_pass(renderpass);
 
         let graphics_pipelines = device
@@ -683,7 +682,7 @@ impl Gpu {
         let view = device.create_image_view(&image_view_info, None)?;
         let view = ScopeRollback::new(view, |view| device.destroy_image_view(view, None));
 
-        let attachments = [*view.borrow()];
+        let attachments = [*view.deref()];
         let framebuffer_create_info = vk::FramebufferCreateInfo::default()
             .render_pass(renderpass)
             .attachments(&attachments)
@@ -729,7 +728,7 @@ impl Gpu {
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buffer = device.create_buffer(&buffer_create_info, None)?;
         let buffer = ScopeRollback::new(buffer, |buffer| device.destroy_buffer(buffer, None));
-        let memory_requirements = device.get_buffer_memory_requirements(*buffer.borrow());
+        let memory_requirements = device.get_buffer_memory_requirements(*buffer.deref());
         // Most vendors provide a sorted list - with less features going first.
         // As soon as the right flag is found, this search will stop, so it should pick a memory
         // type with the closest match.
@@ -768,16 +767,12 @@ impl Gpu {
         };
         let buffer_memory =
             ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
-        device.bind_buffer_memory(*buffer.borrow(), *buffer_memory.borrow(), 0)?;
-        let mapped_memory = device.map_memory(
-            *buffer_memory.borrow(),
-            0,
-            size,
-            vk::MemoryMapFlags::empty(),
-        )?;
+        device.bind_buffer_memory(*buffer.deref(), *buffer_memory.deref(), 0)?;
+        let mapped_memory =
+            device.map_memory(*buffer_memory.deref(), 0, size, vk::MemoryMapFlags::empty())?;
         let mapped_memory = mapped_memory as *mut T;
         let mapped_memory = ScopeRollback::new(mapped_memory, |_| {
-            device.unmap_memory(*buffer_memory.borrow())
+            device.unmap_memory(*buffer_memory.deref())
         });
 
         let layouts = [pipeline.descriptor_set_layout];
@@ -791,12 +786,12 @@ impl Gpu {
         });
 
         let buffer_info = vk::DescriptorBufferInfo::default()
-            .buffer(*buffer.borrow())
+            .buffer(*buffer.deref())
             .offset(0)
             .range(size);
         let buffer_infos = [buffer_info];
         let write_descriptor = vk::WriteDescriptorSet::default()
-            .dst_set(*descriptor_set.borrow())
+            .dst_set(*descriptor_set.deref())
             .dst_binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&buffer_infos);
@@ -1051,11 +1046,13 @@ where
     }
 }
 
-impl<T, F> Borrow<T> for ScopeRollback<T, F>
+impl<T, F> Deref for ScopeRollback<T, F>
 where
     F: FnOnce(T),
 {
-    fn borrow(&self) -> &T {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
         self.val.as_ref().unwrap()
     }
 }
@@ -1103,7 +1100,7 @@ impl fmt::Display for GpuError {
 }
 
 impl error::Error for GpuError {
-    fn cause(&self) -> Option<&(dyn error::Error + 'static)> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
             GpuError::Internal(ref _msg) => None,
             GpuError::Loading(ref e) => Some(e),

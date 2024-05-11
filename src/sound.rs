@@ -405,7 +405,7 @@ impl fmt::Display for SoundError {
 }
 
 impl error::Error for SoundError {
-    fn cause(&self) -> Option<&(dyn error::Error + 'static)> {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
             SoundError::Recv(ref e) => Some(e),
             SoundError::Io(ref e) => Some(e),
