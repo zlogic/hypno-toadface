@@ -4,7 +4,7 @@ This is a weekend project, attempting to display some graphics using Linux ~DRM 
 
 In addition, it can also play audio using the ALSA API, without an audio server - using kernel ioctls.
 
-https://private-user-images.githubusercontent.com/815726/329274790-d0e75489-da36-4b4d-833d-2f8fc1c69e9d.mov
+https://private-user-images.githubusercontent.com/815726/332149344-c367155a-953c-468c-aa67-261616c17d19.mov
 
 ## Why?
 
