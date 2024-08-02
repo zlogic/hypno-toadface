@@ -106,9 +106,8 @@ impl Device {
         // otherwise, keep playing the current buffer in a loop.
         let (new_buffer_requester, empty_buffer_receiver) = mpsc::channel();
         let (full_buffer_sender, full_buffer_receiver) = mpsc::channel();
-        let generator_join_handle = thread::spawn(move || {
-            Device::generator_loop(empty_buffer_receiver, full_buffer_sender)
-        });
+        let generator_join_handle =
+            thread::spawn(move || Self::generator_loop(empty_buffer_receiver, full_buffer_sender));
         // Prefill the buffer queue with a few empty buffers.
         (0..3).for_each(|_| {
             let _ = new_buffer_requester.send(vec![0i16; NOISE_SAMPLES]);
@@ -391,13 +390,13 @@ pub enum SoundError {
 impl fmt::Display for SoundError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            SoundError::Recv(ref e) => {
+            Self::Recv(ref e) => {
                 write!(f, "Receive error: {}", e)
             }
-            SoundError::Io(ref e) => {
+            Self::Io(ref e) => {
                 write!(f, "IO error: {}", e)
             }
-            SoundError::Ioctl(ref e) => {
+            Self::Ioctl(ref e) => {
                 write!(f, "IOCTL error: {}", e)
             }
         }
@@ -407,27 +406,27 @@ impl fmt::Display for SoundError {
 impl error::Error for SoundError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
-            SoundError::Recv(ref e) => Some(e),
-            SoundError::Io(ref e) => Some(e),
-            SoundError::Ioctl(ref e) => Some(e),
+            Self::Recv(ref e) => Some(e),
+            Self::Io(ref e) => Some(e),
+            Self::Ioctl(ref e) => Some(e),
         }
     }
 }
 
 impl From<mpsc::RecvError> for SoundError {
     fn from(err: mpsc::RecvError) -> SoundError {
-        SoundError::Recv(err)
+        Self::Recv(err)
     }
 }
 
 impl From<io::Error> for SoundError {
     fn from(err: io::Error) -> SoundError {
-        SoundError::Io(err)
+        Self::Io(err)
     }
 }
 
 impl From<rustix::io::Errno> for SoundError {
     fn from(err: rustix::io::Errno) -> SoundError {
-        SoundError::Ioctl(err)
+        Self::Ioctl(err)
     }
 }

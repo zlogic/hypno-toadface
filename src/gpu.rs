@@ -94,22 +94,22 @@ impl Gpu {
             // init everything in one place and return a fully initialized GPU instance.
             // If anything goes wrong, ScopeRollback will call desctuctors.
             let entry = ash::Entry::load()?;
-            let instance = Gpu::init_vk(&entry)?;
+            let instance = Self::init_vk(&entry)?;
             let instance = ScopeRollback::new(instance, |instance| instance.destroy_instance(None));
             let display_loader = khr::display::Instance::new(&entry, &instance);
             let surface_loader = khr::surface::Instance::new(&entry, &instance);
 
-            let (physical_device, device_name, graphics_queue) = Gpu::find_device(&instance)?;
+            let (physical_device, device_name, graphics_queue) = Self::find_device(&instance)?;
             let (surface, display_dimensions, display_name) =
-                Gpu::create_display(&display_loader, physical_device)?;
+                Self::create_display(&display_loader, physical_device)?;
             let surface = ScopeRollback::new(surface, |surface| {
                 surface_loader.destroy_surface(surface, None)
             });
-            let device = Gpu::create_device(&instance, physical_device, graphics_queue)?;
+            let device = Self::create_device(&instance, physical_device, graphics_queue)?;
             let device = ScopeRollback::new(device, |device| device.destroy_device(None));
 
             let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
-            let swapchain = Gpu::create_swapchain(
+            let swapchain = Self::create_swapchain(
                 &surface_loader,
                 &swapchain_loader,
                 physical_device,
@@ -122,25 +122,25 @@ impl Gpu {
             });
             let swapchain_images = swapchain_loader.get_swapchain_images(*swapchain.deref())?;
 
-            let renderpass = Gpu::create_renderpass(&device)?;
+            let renderpass = Self::create_renderpass(&device)?;
             let renderpass = ScopeRollback::new(renderpass, |renderpass| {
                 let device: &ash::Device = &device;
                 device.destroy_render_pass(renderpass, None)
             });
-            let pipeline = Gpu::create_pipeline_layout(
+            let pipeline = Self::create_pipeline_layout(
                 &device,
                 display_dimensions,
                 *renderpass.deref(),
                 swapchain_images.len() as u32,
             )?;
-            let control = Gpu::create_control(&device, graphics_queue)?;
+            let control = Self::create_control(&device, graphics_queue)?;
             let control = ScopeRollback::new(control, |control| control.destroy(&device));
 
             let memory_properties = {
                 let instance: &ash::Instance = &instance;
                 instance.get_physical_device_memory_properties(physical_device)
             };
-            let images = Gpu::create_image_buffers(
+            let images = Self::create_image_buffers(
                 &device,
                 swapchain_images,
                 &memory_properties,
@@ -217,7 +217,7 @@ impl Gpu {
                 {
                     return None;
                 }
-                let queue_index = Gpu::find_graphics_queue(instance, device)?;
+                let queue_index = Self::find_graphics_queue(instance, device)?;
 
                 let device_name = props
                     .device_name_as_c_str()
@@ -633,7 +633,7 @@ impl Gpu {
     ) -> Result<Vec<ImageBuffer>, GpuError> {
         let mut images = vec![];
         for image in swapchain_images {
-            let image = Gpu::create_image_buffer(
+            let image = Self::create_image_buffer(
                 device,
                 memory_properties,
                 image,
@@ -704,7 +704,7 @@ impl Gpu {
         });
 
         let param_buffer: Buffer<ShaderParams> =
-            Gpu::create_buffer::<ShaderParams>(device, memory_properties, pipeline)?;
+            Self::create_buffer::<ShaderParams>(device, memory_properties, pipeline)?;
         Ok(ImageBuffer {
             view: view.consume(),
             framebuffer: framebuffer.consume(),
@@ -1081,18 +1081,18 @@ pub enum GpuError {
 impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            GpuError::Internal(ref msg) => f.write_str(msg),
-            GpuError::Loading(ref e) => {
+            Self::Internal(ref msg) => f.write_str(msg),
+            Self::Loading(ref e) => {
                 write!(f, "Failed to init GPU: {}", e)
             }
-            GpuError::Vk(ref msg, ref e) => {
+            Self::Vk(ref msg, ref e) => {
                 if !msg.is_empty() {
                     write!(f, "Vulkan error: {} ({})", msg, e)
                 } else {
                     write!(f, "Vulkan error: {}", e)
                 }
             }
-            GpuError::Io(ref e) => {
+            Self::Io(ref e) => {
                 write!(f, "IO error: {}", e)
             }
         }
@@ -1102,40 +1102,40 @@ impl fmt::Display for GpuError {
 impl error::Error for GpuError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match *self {
-            GpuError::Internal(ref _msg) => None,
-            GpuError::Loading(ref e) => Some(e),
-            GpuError::Vk(_, ref e) => Some(e),
-            GpuError::Io(ref e) => Some(e),
+            Self::Internal(ref _msg) => None,
+            Self::Loading(ref e) => Some(e),
+            Self::Vk(_, ref e) => Some(e),
+            Self::Io(ref e) => Some(e),
         }
     }
 }
 
 impl From<ash::LoadingError> for GpuError {
     fn from(err: ash::LoadingError) -> GpuError {
-        GpuError::Loading(err)
+        Self::Loading(err)
     }
 }
 
 impl From<vk::Result> for GpuError {
     fn from(err: vk::Result) -> GpuError {
-        GpuError::Vk("".into(), err)
+        Self::Vk("".into(), err)
     }
 }
 
 impl From<(&str, vk::Result)> for GpuError {
     fn from(e: (&str, vk::Result)) -> GpuError {
-        GpuError::Vk(e.0.to_string(), e.1)
+        Self::Vk(e.0.to_string(), e.1)
     }
 }
 
 impl From<io::Error> for GpuError {
     fn from(err: io::Error) -> GpuError {
-        GpuError::Io(err)
+        Self::Io(err)
     }
 }
 
 impl From<&str> for GpuError {
     fn from(msg: &str) -> GpuError {
-        GpuError::Internal(msg.to_string())
+        Self::Internal(msg.to_string())
     }
 }
