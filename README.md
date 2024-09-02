@@ -64,6 +64,7 @@ Restart=on-failure
 
 [Install]
 WantedBy=default.target
+EOF
 ```
 
 and start it without logging in:
