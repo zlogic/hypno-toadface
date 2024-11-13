@@ -49,7 +49,7 @@ vec3 hsv_to_rgb(float h, float s, float v) {
 }
 
 void main() {
-    const float timecode = ubo.params[0];
+    const float timecode = fract(ubo.params[0]);
     const float center_width = ubo.params[1];
     const float center_height = ubo.params[2];
     const float max_l = ubo.params[3];

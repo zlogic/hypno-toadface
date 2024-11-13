@@ -821,12 +821,12 @@ impl Gpu {
         image: &ImageBuffer,
         scene: &graphics::Scene,
     ) -> Result<(), vk::Result> {
-        let timecode = scene.timecode - scene.timecode.floor();
+        let timecode = scene.timecode as f32;
         let width = self.display_dimensions.width as f32 / 2.0;
         let height = self.display_dimensions.height as f32 / 2.0;
         let max_distance = width * width + height * height;
         let params = ShaderParams {
-            timecode: timecode as f32,
+            timecode,
             width,
             height,
             max_distance,
