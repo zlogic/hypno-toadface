@@ -651,11 +651,10 @@ impl Gpu {
                 dimensions,
                 pipeline,
             )
-            .map_err(|err| {
+            .inspect_err(|_| {
                 images.iter().for_each(|image: &ImageBuffer| {
                     image.destroy(device, command_pool, pipeline.descriptor_pool)
                 });
-                err
             })?;
             images.push(image);
         }
