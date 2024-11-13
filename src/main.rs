@@ -1,6 +1,7 @@
 use std::{
     env::{self},
-    io::{self, Write},
+    fs::File,
+    io::{self, BufReader, Read, Write},
     process::exit,
     time::Instant,
 };
@@ -15,19 +16,22 @@ mod sound;
 #[derive(Debug)]
 pub struct Args {
     speed: f64,
+    shader_filename: Option<String>,
     no_print_fps: bool,
     sound_device: Option<String>,
 }
 
 const USAGE_INSTRUCTIONS: &str = "Usage: hypno-toadface [OPTIONS] [--sound=<DEVICEPATH>]\n\n\
 Options:\
-\n      --speed=<SPEED>                  Animation speed [default: 0.04]\
-\n      --no-print-fps                   If specified, don't print FPS counter\
-\n      --help                           Print help";
+\n      --speed=<SPEED>          Animation speed [default: 0.04]\
+\n      --shader-file=<FILENAME> Filename for custom SPIR-V frag shader [default: uses built-in]\
+\n      --no-print-fps           If specified, don't print FPS counter\
+\n      --help                   Print help";
 
 fn main() {
     let mut args = Args {
         speed: 0.04,
+        shader_filename: None,
         no_print_fps: false,
         sound_device: None,
     };
@@ -58,6 +62,8 @@ fn main() {
                         exit(2)
                     }
                 };
+            } else if name == "--shader-file" {
+                args.shader_filename = Some(value.to_string());
             } else if name == "--sound" {
                 args.sound_device = Some(value.to_string());
             } else {
@@ -69,9 +75,36 @@ fn main() {
     run_animation(args)
 }
 
+fn load_file(path: &str) -> Result<Vec<u8>, io::Error> {
+    let f = File::open(path)?;
+    let r = BufReader::new(f);
+    let shader_bytes = r.bytes().collect::<Result<Vec<_>, _>>()?;
+    Ok(shader_bytes)
+}
+
 fn run_animation(args: Args) {
-    let renderer = gpu::Gpu::init().expect("Failed to init GPU");
-    let player = args.sound_device.map(|path| sound::Player::new(&path).expect("Failed to init audio device"));
+    let renderer = {
+        let shader_data = if let Some(shader_filename) = args.shader_filename {
+            match load_file(&shader_filename) {
+                Ok(shader_data) => Some(shader_data),
+                Err(err) => {
+                    eprintln!("Failed to load shader file {}: {}", shader_filename, err);
+                    println!("{}", USAGE_INSTRUCTIONS);
+                    exit(2)
+                }
+            }
+        } else {
+            None
+        };
+
+        let conf = gpu::Configuration {
+            shader: shader_data.as_deref(),
+        };
+        gpu::Gpu::init(conf).expect("Failed to init GPU")
+    };
+    let player = args
+        .sound_device
+        .map(|path| sound::Player::new(&path).expect("Failed to init audio device"));
 
     println!("Using video device: {}", renderer.device_name());
 

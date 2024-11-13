@@ -21,10 +21,12 @@ This works well on an off-brand digital signage appliance (NUC) with a Celeron C
 Build and run as a regular Rust project:
 
 ```shell
-./hypno-toadface [--speed=<speed>] [--sound=<devicepath>] [--no-print-fps]
+./hypno-toadface [--speed=<speed>] [--shader-file=<filename>] [--sound=<devicepath>] [--no-print-fps]
 ```
 
 `--speed=<speed>` is an optional argument to specify how fast the animation should be playing, for example `--speed=0.1`. The default speed is 0.04. Negative values make the animation run in reverse.
+
+`--shader-file=<filename>` is an optional argument to specify the filename for a custom SPIR-V fragment shader. If not provided, the default shader will be used.
 
 `--sound=<devicepath>` specifies a path to the ALSA sound device, for example `--sound=/dev/snd/pcmC0D3p`. If not specified, no sound will be played.
 

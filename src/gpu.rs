@@ -86,8 +86,12 @@ where
     rollback: Option<F>,
 }
 
+pub struct Configuration<'a> {
+    pub shader: Option<&'a [u8]>,
+}
+
 impl Gpu {
-    pub fn init() -> Result<Gpu, GpuError> {
+    pub fn init(conf: Configuration) -> Result<Gpu, GpuError> {
         unsafe {
             // Vulkan init code is long an messy - here's an attempt to make it somewhat atomic and simplify cleanup on error.
             // Everything depends on everything, and instead of having a struct with lots of Option fields,
@@ -132,6 +136,7 @@ impl Gpu {
                 display_dimensions,
                 *renderpass.deref(),
                 swapchain_images.len() as u32,
+                conf.shader,
             )?;
             let control = Self::create_control(&device, graphics_queue)?;
             let control = ScopeRollback::new(control, |control| control.destroy(&device));
@@ -452,9 +457,13 @@ impl Gpu {
         dimensions: DisplayDimensions,
         renderpass: vk::RenderPass,
         images_count: u32,
+        fragment_code: Option<&[u8]>,
     ) -> Result<Pipeline, GpuError> {
         let vertex_code: &[u8] = include_bytes!("../shaders/hypno-toadface.vert.spv");
-        let fragment_code: &[u8] = include_bytes!("../shaders/hypno-toadface.frag.spv");
+        let fragment_code: &[u8] = match fragment_code {
+            Some(fragment_code) => fragment_code,
+            None => include_bytes!("../shaders/hypno-toadface.frag.spv"),
+        };
         let vertex_code = ash::util::read_spv(&mut std::io::Cursor::new(vertex_code))?;
         let fragment_code = ash::util::read_spv(&mut std::io::Cursor::new(fragment_code))?;
         let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(vertex_code.as_slice());
