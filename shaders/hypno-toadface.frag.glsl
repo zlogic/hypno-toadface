@@ -4,6 +4,8 @@ layout (binding = 0) uniform UBO {
     vec4 params;
 } ubo;
 
+layout (binding = 1) uniform sampler2D previousImage;
+
 layout (location = 0) out vec4 outFragColor;
 
 float hue_to_rgb(float p, float q, float t) {
