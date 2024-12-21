@@ -20,6 +20,7 @@ pub struct Gpu {
     pipeline: Pipeline,
     control: Control,
     images: Vec<ImageBuffer>,
+    storage_image: StorageImage,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +64,12 @@ struct ImageBuffer {
     framebuffer: vk::Framebuffer,
     command_buffer: vk::CommandBuffer,
     param_buffer: Buffer<ShaderParams>,
+}
+
+struct StorageImage {
+    image: vk::Image,
+    buffer_memory: vk::DeviceMemory,
+    view: vk::ImageView,
 }
 
 #[repr(C)]
@@ -157,6 +164,14 @@ impl Gpu {
                 display_dimensions,
                 &pipeline,
             )?;
+            let images = ScopeRollback::new(images, |images| {
+                images.iter().for_each(|image| {
+                    image.destroy(&device, control.command_pool, pipeline.descriptor_pool)
+                })
+            });
+            let storage_image =
+                Self::create_storage_image(&device, &memory_properties, display_dimensions)?;
+            storage_image.update_descriptor_sets(&device, &images);
             let device_name = format!(
                 "GPU: {}, display: {} ({}x{})",
                 device_name, display_name, display_dimensions.width, display_dimensions.height
@@ -165,6 +180,7 @@ impl Gpu {
             // All is good - consume instances and defuse the scope rollback.
             let surface = surface.consume();
             let swapchain = swapchain.consume();
+            let images = images.consume();
             let control = control.consume();
             let renderpass = renderpass.consume();
             Ok(Gpu {
@@ -181,6 +197,7 @@ impl Gpu {
                 pipeline,
                 control,
                 images,
+                storage_image,
             })
         }
     }
@@ -415,7 +432,7 @@ impl Gpu {
             .min_image_count(min_image_count)
             .image_format(IMAGE_FORMAT)
             .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .image_extent(dimensions.extent())
+            .image_extent(dimensions.extent2d())
             .image_array_layers(1)
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -549,12 +566,17 @@ impl Gpu {
             device.destroy_descriptor_pool(descriptor_pool, None)
         });
 
-        let layout_binding = vk::DescriptorSetLayoutBinding::default()
+        let params_layout_binding = vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
-        let layout_bindings = [layout_binding];
+        let texture_layout_binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT);
+        let layout_bindings = [params_layout_binding, texture_layout_binding];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
         let descriptor_set_layout = device.create_descriptor_set_layout(&layout_info, None)?;
         let descriptor_set_layout =
@@ -721,22 +743,67 @@ impl Gpu {
         })
     }
 
-    unsafe fn create_buffer<T>(
+    unsafe fn create_storage_image(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
-        pipeline: &Pipeline,
-    ) -> Result<Buffer<T>, GpuError> {
-        let size = std::mem::size_of::<T>() as u64;
-        let required_memory_properties =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let usage_flags = vk::BufferUsageFlags::UNIFORM_BUFFER;
-        let buffer_create_info = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(usage_flags)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let buffer = device.create_buffer(&buffer_create_info, None)?;
-        let buffer = ScopeRollback::new(buffer, |buffer| device.destroy_buffer(buffer, None));
-        let memory_requirements = device.get_buffer_memory_requirements(*buffer.deref());
+        dimensions: DisplayDimensions,
+    ) -> Result<StorageImage, GpuError> {
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(IMAGE_FORMAT)
+            .extent(dimensions.extent3d())
+            .mip_levels(1)
+            .array_layers(1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::STORAGE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = device.create_image(&image_info, None)?;
+        let image = ScopeRollback::new(image, |image| device.destroy_image(image, None));
+
+        let memory_requirements = device.get_image_memory_requirements(*image.deref());
+        let (buffer_memory, _) = Self::allocate_memory(
+            device,
+            memory_properties,
+            &memory_requirements,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
+        let buffer_memory =
+            ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
+        device.bind_image_memory(*image.deref(), *buffer_memory.deref(), 0)?;
+
+        let component_mapping = vk::ComponentMapping::default()
+            .r(vk::ComponentSwizzle::R)
+            .g(vk::ComponentSwizzle::G)
+            .b(vk::ComponentSwizzle::B)
+            .a(vk::ComponentSwizzle::A);
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let image_view_info = vk::ImageViewCreateInfo::default()
+            .image(*image.deref())
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(IMAGE_FORMAT)
+            .components(component_mapping)
+            .subresource_range(subresource_range);
+        let view = device.create_image_view(&image_view_info, None)?;
+        let view = ScopeRollback::new(view, |view| device.destroy_image_view(view, None));
+
+        Ok(StorageImage {
+            image: image.consume(),
+            buffer_memory: buffer_memory.consume(),
+            view: view.consume(),
+        })
+    }
+
+    unsafe fn allocate_memory(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        memory_requirements: &vk::MemoryRequirements,
+        required_memory_properties: vk::MemoryPropertyFlags,
+    ) -> Result<(vk::DeviceMemory, bool), GpuError> {
         // Most vendors provide a sorted list - with less features going first.
         // As soon as the right flag is found, this search will stop, so it should pick a memory
         // type with the closest match.
@@ -767,12 +834,36 @@ impl Gpu {
                 Some((mem, host_coherent))
             })
             .next();
-
-        let (buffer_memory, host_coherent) = if let Some(mem) = buffer_memory {
-            mem
+        if let Some((buffer_memory, host_coherent)) = buffer_memory {
+            Ok((buffer_memory, host_coherent))
         } else {
-            return Err("Cannot find suitable memory".into());
-        };
+            Err("Cannot find suitable memory".into())
+        }
+    }
+
+    unsafe fn create_buffer<T>(
+        device: &ash::Device,
+        memory_properties: &vk::PhysicalDeviceMemoryProperties,
+        pipeline: &Pipeline,
+    ) -> Result<Buffer<T>, GpuError> {
+        let size = std::mem::size_of::<T>() as u64;
+        let required_memory_properties =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let usage_flags = vk::BufferUsageFlags::UNIFORM_BUFFER;
+        let buffer_create_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(usage_flags)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = device.create_buffer(&buffer_create_info, None)?;
+        let buffer = ScopeRollback::new(buffer, |buffer| device.destroy_buffer(buffer, None));
+        let memory_requirements = device.get_buffer_memory_requirements(*buffer.deref());
+
+        let (buffer_memory, host_coherent) = Self::allocate_memory(
+            device,
+            memory_properties,
+            &memory_requirements,
+            required_memory_properties,
+        )?;
         let buffer_memory =
             ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
         device.bind_buffer_memory(*buffer.deref(), *buffer_memory.deref(), 0)?;
@@ -956,6 +1047,7 @@ impl Drop for Gpu {
                     self.pipeline.descriptor_pool,
                 )
             });
+            self.storage_image.destroy(&self.device);
             self.control.destroy(&self.device);
             self.pipeline.destroy(&self.device);
             self.device.destroy_render_pass(self.renderpass, None);
@@ -1014,6 +1106,29 @@ impl ImageBuffer {
     }
 }
 
+impl StorageImage {
+    unsafe fn update_descriptor_sets(&self, device: &ash::Device, buffers: &[ImageBuffer]) {
+        buffers.iter().for_each(|image_buffer| {
+            let image_info = vk::DescriptorImageInfo::default()
+                .image_view(self.view)
+                .image_layout(vk::ImageLayout::GENERAL);
+            let image_infos = [image_info];
+            let write_descriptor = vk::WriteDescriptorSet::default()
+                .dst_set(image_buffer.param_buffer.descriptor_set)
+                .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                .image_info(&image_infos);
+            device.update_descriptor_sets(&[write_descriptor], &[]);
+        })
+    }
+
+    unsafe fn destroy(&self, device: &ash::Device) {
+        device.destroy_image(self.image, None);
+        device.free_memory(self.buffer_memory, None);
+        device.destroy_image_view(self.view, None);
+    }
+}
+
 impl Pipeline {
     unsafe fn destroy(&self, device: &ash::Device) {
         device.destroy_pipeline_layout(self.layout, None);
@@ -1025,15 +1140,22 @@ impl Pipeline {
 }
 
 impl DisplayDimensions {
-    fn extent(&self) -> vk::Extent2D {
+    fn extent2d(&self) -> vk::Extent2D {
         vk::Extent2D::default()
             .width(self.width)
             .height(self.height)
     }
 
+    fn extent3d(&self) -> vk::Extent3D {
+        vk::Extent3D::default()
+            .width(self.width)
+            .height(self.height)
+            .depth(1)
+    }
+
     fn render_area(&self) -> vk::Rect2D {
         let offset = vk::Offset2D::default().x(0).y(0);
-        vk::Rect2D::default().offset(offset).extent(self.extent())
+        vk::Rect2D::default().offset(offset).extent(self.extent2d())
     }
 }
 
