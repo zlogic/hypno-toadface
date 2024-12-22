@@ -18,6 +18,7 @@ pub struct Args {
     speed: f64,
     shader_filename: Option<String>,
     no_print_fps: bool,
+    keep_last_frame: bool,
     sound_device: Option<String>,
 }
 
@@ -26,6 +27,7 @@ Options:\
 \n      --speed=<SPEED>          Animation speed [default: 0.04]\
 \n      --shader-file=<FILENAME> Filename for custom SPIR-V frag shader [default: uses built-in]\
 \n      --no-print-fps           If specified, don't print FPS counter\
+\n      --keep-last-frame        If specified, save last frame and provide it to the shader\
 \n      --help                   Print help";
 
 fn main() {
@@ -33,6 +35,7 @@ fn main() {
         speed: 0.04,
         shader_filename: None,
         no_print_fps: false,
+        keep_last_frame: false,
         sound_device: None,
     };
     for arg in env::args().skip(1) {
@@ -44,6 +47,10 @@ fn main() {
             }
             if arg == "--no-print-fps" {
                 args.no_print_fps = true;
+                continue;
+            }
+            if arg == "--keep-last-frame" {
+                args.keep_last_frame = true;
                 continue;
             }
             let (name, value) = if let Some(arg) = arg.split_once('=') {
@@ -99,6 +106,7 @@ fn run_animation(args: Args) {
 
         let conf = gpu::Configuration {
             shader: shader_data.as_deref(),
+            store_image: args.keep_last_frame,
         };
         gpu::Gpu::init(conf).expect("Failed to init GPU")
     };

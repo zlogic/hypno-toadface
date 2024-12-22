@@ -20,7 +20,7 @@ pub struct Gpu {
     pipeline: Pipeline,
     control: Control,
     images: Vec<ImageBuffer>,
-    storage_image: StorageImage,
+    storage_image: Option<StorageImage>,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +96,7 @@ where
 
 pub struct Configuration<'a> {
     pub shader: Option<&'a [u8]>,
+    pub store_image: bool,
 }
 
 impl Gpu {
@@ -153,11 +154,16 @@ impl Gpu {
                 let instance: &ash::Instance = &instance;
                 instance.get_physical_device_memory_properties(physical_device)
             };
-            let storage_image =
-                Self::create_storage_image(&device, &memory_properties, display_dimensions)?;
-            let storage_image = ScopeRollback::new(storage_image, |storage_image| {
-                storage_image.destroy(&device)
-            });
+            let storage_image = if conf.store_image {
+                let storage_image =
+                    Self::create_storage_image(&device, &memory_properties, display_dimensions)?;
+                let storage_image = ScopeRollback::new(storage_image, |storage_image| {
+                    storage_image.destroy(&device)
+                });
+                Some(storage_image)
+            } else {
+                None
+            };
             let images = Self::create_image_buffers(
                 &device,
                 swapchain_images,
@@ -170,7 +176,9 @@ impl Gpu {
                 display_dimensions,
                 &pipeline,
             )?;
-            storage_image.add_to_descriptor_sets(&device, &images);
+            if let Some(storage_image) = &storage_image {
+                storage_image.add_to_descriptor_sets(&device, &images);
+            }
             let device_name = format!(
                 "GPU: {}, display: {} ({}x{})",
                 device_name, display_name, display_dimensions.width, display_dimensions.height
@@ -181,7 +189,7 @@ impl Gpu {
             let swapchain = swapchain.consume();
             let control = control.consume();
             let renderpass = renderpass.consume();
-            let storage_image = storage_image.consume();
+            let storage_image = storage_image.map(|storage_image| storage_image.consume());
             Ok(Gpu {
                 _entry: entry,
                 instance: instance.consume(),
@@ -932,6 +940,11 @@ impl Gpu {
     }
 
     unsafe fn save_last_frame(&self, image: &ImageBuffer) {
+        let save_destination = if let Some(storage_image) = &self.storage_image {
+            storage_image.image
+        } else {
+            return;
+        };
         let copy_subresource = vk::ImageSubresourceLayers::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .mip_level(0)
@@ -945,7 +958,7 @@ impl Gpu {
             image.command_buffer,
             image.image,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            self.storage_image.image,
+            save_destination,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             &[copy_region],
         );
@@ -1076,7 +1089,9 @@ impl Drop for Gpu {
                     self.pipeline.descriptor_pool,
                 )
             });
-            self.storage_image.destroy(&self.device);
+            if let Some(storage_image) = &self.storage_image {
+                storage_image.destroy(&self.device);
+            }
             self.control.destroy(&self.device);
             self.pipeline.destroy(&self.device);
             self.device.destroy_render_pass(self.renderpass, None);

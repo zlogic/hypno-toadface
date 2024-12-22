@@ -21,7 +21,7 @@ This works well on an off-brand digital signage appliance (NUC) with a Celeron C
 Build and run as a regular Rust project:
 
 ```shell
-./hypno-toadface [--speed=<speed>] [--shader-file=<filename>] [--sound=<devicepath>] [--no-print-fps]
+./hypno-toadface [--speed=<speed>] [--shader-file=<filename>] [--sound=<devicepath>] [--no-print-fps] [--keep-last-frame]
 ```
 
 `--speed=<speed>` is an optional argument to specify how fast the animation should be playing, for example `--speed=0.1`. The default speed is 0.04. Negative values make the animation run in reverse.
@@ -31,6 +31,8 @@ Build and run as a regular Rust project:
 `--sound=<devicepath>` specifies a path to the ALSA sound device, for example `--sound=/dev/snd/pcmC0D3p`. If not specified, no sound will be played.
 
 `--no-print-fps` turns off printing the FPS counter.
+
+`--keep-last-frame` saves the last frame and binds it as a texture (`layout (binding = 1) uniform sampler2D previousImage;`). It can be accessed as `texture(previousImage, coord)` in a shader. As this has a performance impact, this feature is disabled by default.
 
 ⚠️ This project works without a windowing manager, but in Linux only one device can have exclusive access to the GPU. If X or Wayland is running, using the GPU would be impossible. To run this project, stop any windowing managers.
 
@@ -74,6 +76,10 @@ and start it without logging in:
 ```shell
 sudo loginctl enable-linger $USER
 ```
+
+## Fun fact
+
+Intel HD graphics GPUs have issues with trigonometric functions if the numbers are too large. `sin(x)` starts producing incorrect results if x is larger than 14000, as seen [in this demo](https://www.shadertoy.com/view/4lBcWh). The fix is replacing `sin(x)` with `sin(mod(x, M_PI*2.0))`.
 
 ## References:
 
