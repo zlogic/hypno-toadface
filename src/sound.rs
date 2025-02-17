@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use rand::prelude::*;
+use rand::Rng as _;
 
 use rustix::ioctl;
 
@@ -167,7 +167,7 @@ impl Device {
     ) -> Result<(), mpsc::RecvError> {
         // Biquads are stateful and playing the same fragment in a loop
         // will cause popping or crackling noise.
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut biquads: [Biquad; CHANNELS as usize] = array::from_fn(|_| {
             Biquad::new(BIQUAD_LOWPASS_CENTER_FREQUENCY, BIQUAD_LOWPASS_Q_FACTOR)
         });
@@ -177,7 +177,7 @@ impl Device {
             let mut noise_dest = empty_buffers_chan.recv()?;
             noise_dest.iter_mut().enumerate().for_each(|(i, dest)| {
                 let biquad = &mut biquads[i % (CHANNELS as usize)];
-                let noise_sample = rng.gen_range(-1.0..1.0);
+                let noise_sample = rng.random_range(-1.0..1.0);
                 let out = biquad.process(noise_sample) * biquad_multiplication;
                 *dest = out.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
             });
