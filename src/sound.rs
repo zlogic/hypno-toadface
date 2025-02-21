@@ -27,12 +27,10 @@ impl Player {
     pub fn new(filename: &str) -> Result<Player, io::Error> {
         let device = Device::create(filename)?;
 
-        unsafe {
-            device.set_params()?;
-        }
+        device.set_params()?;
 
         let (shutdown_sender, shutdown_receiver) = mpsc::channel();
-        let join_handle = thread::spawn(move || unsafe {
+        let join_handle = thread::spawn(move || {
             let mut device = device;
             device.play_loop(shutdown_receiver)
         });
@@ -56,7 +54,7 @@ impl Device {
         Ok(Device { file })
     }
 
-    unsafe fn set_params(&self) -> Result<(), io::Error> {
+    fn set_params(&self) -> Result<(), io::Error> {
         let mut params = alsa::Params::new();
         params.rmask = 0;
         params.cmask = 0;
@@ -91,16 +89,20 @@ impl Device {
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_ACCESS, access, false, false);
         params.set_imask(alsa::SNDRV_PCM_HW_PARAM_FORMAT, format, false, false);
 
-        ioctl::ioctl(
-            &self.file,
-            ioctl::Updater::<alsa::IoCtlHwParams, alsa::Params>::new(&mut params),
-        )?;
+        unsafe {
+            ioctl::ioctl(
+                &self.file,
+                ioctl::Updater::<alsa::IoCtlHwParams, alsa::Params>::new(&mut params),
+            )?;
+        }
 
-        ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+        unsafe {
+            ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+        }
         Ok(())
     }
 
-    unsafe fn play_loop(&mut self, shutdown_chan: mpsc::Receiver<()>) -> Result<(), SoundError> {
+    fn play_loop(&mut self, shutdown_chan: mpsc::Receiver<()>) -> Result<(), SoundError> {
         // This loop will non-blockingly check if a new buffer is available and switch to using it.
         // The used buffer will be send to the generator, so that it can fill it with fresh data;
         // otherwise, keep playing the current buffer in a loop.
@@ -137,20 +139,22 @@ impl Device {
             }
 
             let submit = alsa::SubmitBuffer::new(noise_samples.as_slice());
-            match ioctl::ioctl(
-                &self.file,
-                ioctl::Setter::<alsa::IoCtlWriteiFrames, _>::new(submit),
-            ) {
-                Ok(()) => {}
-                Err(rustix::io::Errno::PIPE) => {
-                    // Buffer underrun occurred, restart device.
-                    ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
-                }
-                Err(rustix::io::Errno::INTR) => {
-                    // If interrupted, nothing to do.
-                }
-                Err(err) => {
-                    return Err(err.into());
+            unsafe {
+                match ioctl::ioctl(
+                    &self.file,
+                    ioctl::Setter::<alsa::IoCtlWriteiFrames, _>::new(submit),
+                ) {
+                    Ok(()) => {}
+                    Err(rustix::io::Errno::PIPE) => {
+                        // Buffer underrun occurred, restart device.
+                        ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+                    }
+                    Err(rustix::io::Errno::INTR) => {
+                        // If interrupted, nothing to do.
+                    }
+                    Err(err) => {
+                        return Err(err.into());
+                    }
                 }
             }
         }

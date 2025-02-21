@@ -119,9 +119,7 @@ fn run_animation(args: Args) {
     let start = Instant::now();
     let mut framecounter_start = Instant::now();
     let mut framecounter_frames = 0usize;
-    unsafe {
-        sighandler::listen_to_sigint();
-    }
+    sighandler::listen_to_sigint();
     loop {
         if sighandler::stop_requested() {
             break;

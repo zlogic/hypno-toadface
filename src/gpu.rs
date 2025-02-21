@@ -213,7 +213,7 @@ impl Gpu {
         self.device_name.as_str()
     }
 
-    unsafe fn init_vk(entry: &ash::Entry) -> VkResult<ash::Instance> {
+    fn init_vk(entry: &ash::Entry) -> VkResult<ash::Instance> {
         let app_name = c"Hypno Toadface";
         let engine_name = c"hypno-toadface";
         let appinfo = vk::ApplicationInfo::default()
@@ -229,18 +229,18 @@ impl Gpu {
             .application_info(&appinfo)
             .flags(create_flags)
             .enabled_extension_names(&enabled_extensions);
-        entry.create_instance(&create_info, None)
+        unsafe { entry.create_instance(&create_info, None) }
     }
 
-    unsafe fn find_device(
+    fn find_device(
         instance: &ash::Instance,
     ) -> Result<(vk::PhysicalDevice, String, u32), GpuError> {
-        let devices = instance.enumerate_physical_devices()?;
+        let devices = unsafe { instance.enumerate_physical_devices()? };
         let device = devices
             .iter()
             .filter_map(|device| {
                 let device = *device;
-                let props = instance.get_physical_device_properties(device);
+                let props = unsafe { instance.get_physical_device_properties(device) };
                 if props.limits.max_uniform_buffer_range
                     < std::mem::size_of::<ShaderParams>() as u32
                 {
@@ -272,44 +272,49 @@ impl Gpu {
         Ok((device, name, queue_index))
     }
 
-    unsafe fn find_graphics_queue(
-        instance: &ash::Instance,
-        device: vk::PhysicalDevice,
-    ) -> Option<u32> {
-        instance
-            .get_physical_device_queue_family_properties(device)
-            .iter()
-            .enumerate()
-            .flat_map(|(index, queue)| {
-                if queue.queue_flags.contains(vk::QueueFlags::GRAPHICS) && queue.queue_count > 0 {
-                    Some(index as u32)
-                } else {
-                    None
-                }
-            })
-            .next()
+    fn find_graphics_queue(instance: &ash::Instance, device: vk::PhysicalDevice) -> Option<u32> {
+        unsafe {
+            instance
+                .get_physical_device_queue_family_properties(device)
+                .iter()
+                .enumerate()
+                .flat_map(|(index, queue)| {
+                    if queue.queue_flags.contains(vk::QueueFlags::GRAPHICS) && queue.queue_count > 0
+                    {
+                        Some(index as u32)
+                    } else {
+                        None
+                    }
+                })
+                .next()
+        }
     }
 
-    unsafe fn create_display(
+    fn create_display(
         display_loader: &khr::display::Instance,
         physical_device: vk::PhysicalDevice,
     ) -> Result<(vk::SurfaceKHR, DisplayDimensions, String), GpuError> {
-        let displays = display_loader.get_physical_device_display_properties(physical_device)?;
+        let displays =
+            unsafe { display_loader.get_physical_device_display_properties(physical_device)? };
         let display = displays.first().ok_or("No displays found")?;
 
-        let display_modes =
-            display_loader.get_display_mode_properties(physical_device, display.display)?;
+        let display_modes = unsafe {
+            display_loader.get_display_mode_properties(physical_device, display.display)?
+        };
         let display_mode = display_modes.first().ok_or("No display modes found")?;
 
-        let display_planes =
-            display_loader.get_physical_device_display_plane_properties(physical_device)?;
+        let display_planes = unsafe {
+            display_loader.get_physical_device_display_plane_properties(physical_device)?
+        };
         let display_plane_index = display_planes
             .iter()
             .enumerate()
             .find_map(|(i, _plane)| {
-                let supported_displays = display_loader
-                    .get_display_plane_supported_displays(physical_device, i as u32)
-                    .ok()?;
+                let supported_displays = unsafe {
+                    display_loader
+                        .get_display_plane_supported_displays(physical_device, i as u32)
+                        .ok()?
+                };
                 if supported_displays.contains(&display.display) {
                     return None;
                 }
@@ -332,25 +337,30 @@ impl Gpu {
 
         let display_mode_create_info =
             vk::DisplayModeCreateInfoKHR::default().parameters(display_mode.parameters);
-        let surface_display_mode = display_loader.create_display_mode(
-            physical_device,
-            display.display,
-            &display_mode_create_info,
-            None,
-        )?;
+        let surface_display_mode = unsafe {
+            display_loader.create_display_mode(
+                physical_device,
+                display.display,
+                &display_mode_create_info,
+                None,
+            )?
+        };
 
         let display_surface_create_info = vk::DisplaySurfaceCreateInfoKHR::default()
             .display_mode(surface_display_mode)
             .plane_index(display_plane_index as u32)
             .image_extent(display_mode.parameters.visible_region);
-        let display_plane_surface =
-            display_loader.create_display_plane_surface(&display_surface_create_info, None)?;
+        let display_plane_surface = unsafe {
+            display_loader.create_display_plane_surface(&display_surface_create_info, None)?
+        };
 
-        let display_name = display
-            .display_name_as_c_str()
-            .unwrap_or(c"[unknown]")
-            .to_string_lossy()
-            .to_string();
+        let display_name = unsafe {
+            display
+                .display_name_as_c_str()
+                .unwrap_or(c"[unknown]")
+                .to_string_lossy()
+                .to_string()
+        };
 
         let display_dimensions = DisplayDimensions {
             width: display_mode.parameters.visible_region.width,
@@ -359,7 +369,7 @@ impl Gpu {
         Ok((display_plane_surface, display_dimensions, display_name))
     }
 
-    unsafe fn create_device(
+    fn create_device(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
         graphics_queue_index: u32,
@@ -373,10 +383,10 @@ impl Gpu {
             .queue_create_infos(std::slice::from_ref(&queue_info))
             .enabled_extension_names(&enabled_extensions)
             .enabled_features(&features);
-        instance.create_device(physical_device, &device_create_info, None)
+        unsafe { instance.create_device(physical_device, &device_create_info, None) }
     }
 
-    unsafe fn create_swapchain(
+    fn create_swapchain(
         surface_loader: &khr::surface::Instance,
         swapchain_loader: &khr::swapchain::Device,
         physical_device: vk::PhysicalDevice,
@@ -384,8 +394,9 @@ impl Gpu {
         surface: vk::SurfaceKHR,
         dimensions: DisplayDimensions,
     ) -> Result<vk::SwapchainKHR, GpuError> {
-        let surface_capabilities =
-            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?;
+        let surface_capabilities = unsafe {
+            surface_loader.get_physical_device_surface_capabilities(physical_device, surface)?
+        };
         if !surface_capabilities
             .supported_composite_alpha
             .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
@@ -393,19 +404,23 @@ impl Gpu {
             return Err("Opaque composite alpha not supported".into());
         }
 
-        let device_supported = surface_loader.get_physical_device_surface_support(
-            physical_device,
-            graphics_queue_index,
-            surface,
-        )?;
+        let device_supported = unsafe {
+            surface_loader.get_physical_device_surface_support(
+                physical_device,
+                graphics_queue_index,
+                surface,
+            )?
+        };
         if !device_supported {
             return Err("Device doesn't support surface".into());
         }
 
         // TODO: pick a presentation mode from a prioritized list?
-        let supports_mailbox = surface_loader
-            .get_physical_device_surface_present_modes(physical_device, surface)?
-            .contains(&vk::PresentModeKHR::MAILBOX);
+        let supports_mailbox = unsafe {
+            surface_loader
+                .get_physical_device_surface_present_modes(physical_device, surface)?
+                .contains(&vk::PresentModeKHR::MAILBOX)
+        };
         let present_mode = if supports_mailbox {
             vk::PresentModeKHR::MAILBOX
         } else {
@@ -423,8 +438,9 @@ impl Gpu {
         };
 
         // Choose the best image format.
-        let surface_formats =
-            surface_loader.get_physical_device_surface_formats(physical_device, surface)?;
+        let surface_formats = unsafe {
+            surface_loader.get_physical_device_surface_formats(physical_device, surface)?
+        };
         surface_formats
             .iter()
             .find(|format| {
@@ -449,10 +465,10 @@ impl Gpu {
             .clipped(true)
             .present_mode(present_mode);
 
-        Ok(swapchain_loader.create_swapchain(&swapchain_create_info, None)?)
+        unsafe { Ok(swapchain_loader.create_swapchain(&swapchain_create_info, None)?) }
     }
 
-    unsafe fn create_renderpass(device: &ash::Device) -> Result<vk::RenderPass, vk::Result> {
+    fn create_renderpass(device: &ash::Device) -> Result<vk::RenderPass, vk::Result> {
         let color_attachment_description = vk::AttachmentDescription::default()
             .format(IMAGE_FORMAT)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -473,10 +489,10 @@ impl Gpu {
         let render_pass_create_info = vk::RenderPassCreateInfo::default()
             .attachments(&attachments)
             .subpasses(&subpasses);
-        device.create_render_pass(&render_pass_create_info, None)
+        unsafe { device.create_render_pass(&render_pass_create_info, None) }
     }
 
-    unsafe fn create_pipeline_layout(
+    fn create_pipeline_layout(
         device: &ash::Device,
         dimensions: DisplayDimensions,
         renderpass: vk::RenderPass,
@@ -493,16 +509,20 @@ impl Gpu {
         let vertex_shader_info = vk::ShaderModuleCreateInfo::default().code(vertex_code.as_slice());
         let fragment_shader_info =
             vk::ShaderModuleCreateInfo::default().code(fragment_code.as_slice());
-        let vertex_shader_module = device
-            .create_shader_module(&vertex_shader_info, None)
-            .map_err(|err| ("Vertex shader module error", err))?;
-        let vertex_shader_module = ScopeRollback::new(vertex_shader_module, |module| {
+        let vertex_shader_module = unsafe {
+            device
+                .create_shader_module(&vertex_shader_info, None)
+                .map_err(|err| ("Vertex shader module error", err))?
+        };
+        let vertex_shader_module = ScopeRollback::new(vertex_shader_module, |module| unsafe {
             device.destroy_shader_module(module, None)
         });
-        let fragment_shader_module = device
-            .create_shader_module(&fragment_shader_info, None)
-            .map_err(|err| ("Fragment shader module error", err))?;
-        let fragment_shader_module = ScopeRollback::new(fragment_shader_module, |module| {
+        let fragment_shader_module = unsafe {
+            device
+                .create_shader_module(&fragment_shader_info, None)
+                .map_err(|err| ("Fragment shader module error", err))?
+        };
+        let fragment_shader_module = ScopeRollback::new(fragment_shader_module, |module| unsafe {
             device.destroy_shader_module(module, None)
         });
 
@@ -573,8 +593,9 @@ impl Gpu {
             .max_sets(images_count)
             .pool_sizes(&descriptor_pool_size);
 
-        let descriptor_pool = device.create_descriptor_pool(&descriptor_pool_info, None)?;
-        let descriptor_pool = ScopeRollback::new(descriptor_pool, |descriptor_pool| {
+        let descriptor_pool =
+            unsafe { device.create_descriptor_pool(&descriptor_pool_info, None)? };
+        let descriptor_pool = ScopeRollback::new(descriptor_pool, |descriptor_pool| unsafe {
             device.destroy_descriptor_pool(descriptor_pool, None)
         });
 
@@ -590,17 +611,18 @@ impl Gpu {
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
         let layout_bindings = [params_layout_binding, texture_layout_binding];
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&layout_bindings);
-        let descriptor_set_layout = device.create_descriptor_set_layout(&layout_info, None)?;
         let descriptor_set_layout =
-            ScopeRollback::new(descriptor_set_layout, |descriptor_set_layout| {
+            unsafe { device.create_descriptor_set_layout(&layout_info, None)? };
+        let descriptor_set_layout =
+            ScopeRollback::new(descriptor_set_layout, |descriptor_set_layout| unsafe {
                 device.destroy_descriptor_set_layout(descriptor_set_layout, None)
             });
 
         let descriptor_set_layouts = [*descriptor_set_layout.deref()];
         let layout_create_info =
             vk::PipelineLayoutCreateInfo::default().set_layouts(&descriptor_set_layouts);
-        let layout = device.create_pipeline_layout(&layout_create_info, None)?;
-        let layout = ScopeRollback::new(layout, |layout| {
+        let layout = unsafe { device.create_pipeline_layout(&layout_create_info, None)? };
+        let layout = ScopeRollback::new(layout, |layout| unsafe {
             device.destroy_pipeline_layout(layout, None)
         });
 
@@ -616,9 +638,15 @@ impl Gpu {
             .layout(*layout.deref())
             .render_pass(renderpass);
 
-        let graphics_pipelines = device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &[graphic_pipeline_info], None)
-            .map_err(|(_pipelines, err)| err)?;
+        let graphics_pipelines = unsafe {
+            device
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    &[graphic_pipeline_info],
+                    None,
+                )
+                .map_err(|(_pipelines, err)| err)?
+        };
         let pipeline = graphics_pipelines[0];
 
         Ok(Pipeline {
@@ -633,29 +661,31 @@ impl Gpu {
         })
     }
 
-    unsafe fn create_control(
+    fn create_control(
         device: &ash::Device,
         queue_family_index: u32,
     ) -> Result<Control, vk::Result> {
-        let queue = device.get_device_queue(queue_family_index, 0);
+        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
         let command_pool_info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool = device.create_command_pool(&command_pool_info, None)?;
-        let command_pool = ScopeRollback::new(command_pool, |command_pool| {
+        let command_pool = unsafe { device.create_command_pool(&command_pool_info, None)? };
+        let command_pool = ScopeRollback::new(command_pool, |command_pool| unsafe {
             device.destroy_command_pool(command_pool, None)
         });
         let fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let fence = device.create_fence(&fence_create_info, None)?;
-        let fence = ScopeRollback::new(fence, |fence| device.destroy_fence(fence, None));
+        let fence = unsafe { device.create_fence(&fence_create_info, None)? };
+        let fence = ScopeRollback::new(fence, |fence| unsafe { device.destroy_fence(fence, None) });
         let semaphore_create_info = vk::SemaphoreCreateInfo::default();
-        let present_complete_semaphore = device.create_semaphore(&semaphore_create_info, None)?;
         let present_complete_semaphore =
-            ScopeRollback::new(present_complete_semaphore, |semaphore| {
+            unsafe { device.create_semaphore(&semaphore_create_info, None)? };
+        let present_complete_semaphore =
+            ScopeRollback::new(present_complete_semaphore, |semaphore| unsafe {
                 device.destroy_semaphore(semaphore, None)
             });
-        let rendering_complete_semaphore = device.create_semaphore(&semaphore_create_info, None)?;
+        let rendering_complete_semaphore =
+            unsafe { device.create_semaphore(&semaphore_create_info, None)? };
         Ok(Control {
             queue,
             command_pool: command_pool.consume(),
@@ -665,7 +695,7 @@ impl Gpu {
         })
     }
 
-    unsafe fn create_image_buffers(
+    fn create_image_buffers(
         device: &ash::Device,
         swapchain_images: Vec<vk::Image>,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
@@ -695,7 +725,7 @@ impl Gpu {
         Ok(images)
     }
 
-    unsafe fn create_image_buffer(
+    fn create_image_buffer(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         image: vk::Image,
@@ -721,8 +751,10 @@ impl Gpu {
             .format(IMAGE_FORMAT)
             .components(component_mapping)
             .subresource_range(subresource_range);
-        let view = device.create_image_view(&image_view_info, None)?;
-        let view = ScopeRollback::new(view, |view| device.destroy_image_view(view, None));
+        let view = unsafe { device.create_image_view(&image_view_info, None)? };
+        let view = ScopeRollback::new(view, |view| unsafe {
+            device.destroy_image_view(view, None)
+        });
 
         let attachments = [*view.deref()];
         let framebuffer_create_info = vk::FramebufferCreateInfo::default()
@@ -731,8 +763,8 @@ impl Gpu {
             .width(dimensions.width)
             .height(dimensions.height)
             .layers(1);
-        let framebuffer = device.create_framebuffer(&framebuffer_create_info, None)?;
-        let framebuffer = ScopeRollback::new(framebuffer, |framebuffer| {
+        let framebuffer = unsafe { device.create_framebuffer(&framebuffer_create_info, None)? };
+        let framebuffer = ScopeRollback::new(framebuffer, |framebuffer| unsafe {
             device.destroy_framebuffer(framebuffer, None)
         });
 
@@ -740,8 +772,8 @@ impl Gpu {
             .command_buffer_count(1)
             .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY);
-        let command_buffers = device.allocate_command_buffers(&command_buffers_info)?;
-        let command_buffer = ScopeRollback::new(command_buffers[0], |_| {
+        let command_buffers = unsafe { device.allocate_command_buffers(&command_buffers_info)? };
+        let command_buffer = ScopeRollback::new(command_buffers[0], |_| unsafe {
             device.free_command_buffers(command_pool, &command_buffers)
         });
 
@@ -756,7 +788,7 @@ impl Gpu {
         })
     }
 
-    unsafe fn create_storage_image(
+    fn create_storage_image(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         dimensions: DisplayDimensions,
@@ -772,19 +804,20 @@ impl Gpu {
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::STORAGE)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let image = device.create_image(&image_info, None)?;
-        let image = ScopeRollback::new(image, |image| device.destroy_image(image, None));
+        let image = unsafe { device.create_image(&image_info, None)? };
+        let image = ScopeRollback::new(image, |image| unsafe { device.destroy_image(image, None) });
 
-        let memory_requirements = device.get_image_memory_requirements(*image.deref());
+        let memory_requirements = unsafe { device.get_image_memory_requirements(*image.deref()) };
         let (buffer_memory, _) = Self::allocate_memory(
             device,
             memory_properties,
             &memory_requirements,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
-        let buffer_memory =
-            ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
-        device.bind_image_memory(*image.deref(), *buffer_memory.deref(), 0)?;
+        let buffer_memory = ScopeRollback::new(buffer_memory, |memory| unsafe {
+            device.free_memory(memory, None)
+        });
+        unsafe { device.bind_image_memory(*image.deref(), *buffer_memory.deref(), 0)? };
 
         let component_mapping = vk::ComponentMapping::default()
             .r(vk::ComponentSwizzle::R)
@@ -803,7 +836,7 @@ impl Gpu {
             .format(IMAGE_FORMAT)
             .components(component_mapping)
             .subresource_range(subresource_range);
-        let view = device.create_image_view(&image_view_info, None)?;
+        let view = unsafe { device.create_image_view(&image_view_info, None)? };
 
         Ok(StorageImage {
             image: image.consume(),
@@ -812,7 +845,7 @@ impl Gpu {
         })
     }
 
-    unsafe fn allocate_memory(
+    fn allocate_memory(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         memory_requirements: &vk::MemoryRequirements,
@@ -843,7 +876,7 @@ impl Gpu {
                     .allocation_size(memory_requirements.size)
                     .memory_type_index(memory_type_index as u32);
                 // Some buffers may fill up, in this case allocating memory can fail.
-                let mem = device.allocate_memory(&allocate_info, None).ok()?;
+                let mem = unsafe { device.allocate_memory(&allocate_info, None).ok()? };
 
                 Some((mem, host_coherent))
             })
@@ -855,7 +888,7 @@ impl Gpu {
         }
     }
 
-    unsafe fn create_buffer<T>(
+    fn create_buffer<T>(
         device: &ash::Device,
         memory_properties: &vk::PhysicalDeviceMemoryProperties,
         pipeline: &Pipeline,
@@ -868,9 +901,11 @@ impl Gpu {
             .size(size)
             .usage(usage_flags)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let buffer = device.create_buffer(&buffer_create_info, None)?;
-        let buffer = ScopeRollback::new(buffer, |buffer| device.destroy_buffer(buffer, None));
-        let memory_requirements = device.get_buffer_memory_requirements(*buffer.deref());
+        let buffer = unsafe { device.create_buffer(&buffer_create_info, None)? };
+        let buffer = ScopeRollback::new(buffer, |buffer| unsafe {
+            device.destroy_buffer(buffer, None)
+        });
+        let memory_requirements = unsafe { device.get_buffer_memory_requirements(*buffer.deref()) };
 
         let (buffer_memory, host_coherent) = Self::allocate_memory(
             device,
@@ -878,13 +913,15 @@ impl Gpu {
             &memory_requirements,
             required_memory_properties,
         )?;
-        let buffer_memory =
-            ScopeRollback::new(buffer_memory, |memory| device.free_memory(memory, None));
-        device.bind_buffer_memory(*buffer.deref(), *buffer_memory.deref(), 0)?;
-        let mapped_memory =
-            device.map_memory(*buffer_memory.deref(), 0, size, vk::MemoryMapFlags::empty())?;
+        let buffer_memory = ScopeRollback::new(buffer_memory, |memory| unsafe {
+            device.free_memory(memory, None)
+        });
+        let mapped_memory = unsafe {
+            device.bind_buffer_memory(*buffer.deref(), *buffer_memory.deref(), 0)?;
+            device.map_memory(*buffer_memory.deref(), 0, size, vk::MemoryMapFlags::empty())?
+        };
         let mapped_memory = mapped_memory as *mut T;
-        let mapped_memory = ScopeRollback::new(mapped_memory, |_| {
+        let mapped_memory = ScopeRollback::new(mapped_memory, |_| unsafe {
             device.unmap_memory(*buffer_memory.deref())
         });
 
@@ -892,9 +929,10 @@ impl Gpu {
         let descriptor_set_allocate_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pipeline.descriptor_pool)
             .set_layouts(&layouts);
-        let descriptor_sets = device.allocate_descriptor_sets(&descriptor_set_allocate_info)?;
+        let descriptor_sets =
+            unsafe { device.allocate_descriptor_sets(&descriptor_set_allocate_info)? };
         let descriptor_set = descriptor_sets[0];
-        let descriptor_set = ScopeRollback::new(descriptor_set, |descriptor_set| {
+        let descriptor_set = ScopeRollback::new(descriptor_set, |descriptor_set| unsafe {
             let _ = device.free_descriptor_sets(pipeline.descriptor_pool, &[descriptor_set]);
         });
 
@@ -908,7 +946,9 @@ impl Gpu {
             .dst_binding(0)
             .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
             .buffer_info(&buffer_infos);
-        device.update_descriptor_sets(&[write_buffer_info], &[]);
+        unsafe {
+            device.update_descriptor_sets(&[write_buffer_info], &[]);
+        }
 
         let mapped_memory = mapped_memory.consume();
         let buffer_memory = buffer_memory.consume();
@@ -921,7 +961,7 @@ impl Gpu {
         })
     }
 
-    unsafe fn copy_buffer_data(
+    fn copy_buffer_data(
         &self,
         image: &ImageBuffer,
         scene: &graphics::Scene,
@@ -939,7 +979,7 @@ impl Gpu {
         image.param_buffer.write(&self.device, params)
     }
 
-    unsafe fn save_last_frame(&self, image: &ImageBuffer) {
+    fn save_last_frame(&self, image: &ImageBuffer) {
         let save_destination = if let Some(storage_image) = &self.storage_image {
             storage_image.image
         } else {
@@ -954,36 +994,36 @@ impl Gpu {
             .src_subresource(copy_subresource)
             .dst_subresource(copy_subresource)
             .extent(self.display_dimensions.extent3d());
-        self.device.cmd_copy_image(
-            image.command_buffer,
-            image.image,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            save_destination,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[copy_region],
-        );
+        unsafe {
+            self.device.cmd_copy_image(
+                image.command_buffer,
+                image.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                save_destination,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[copy_region],
+            );
+        }
     }
 
-    unsafe fn render_image(
-        &self,
-        image: &ImageBuffer,
-        scene: &graphics::Scene,
-    ) -> Result<(), GpuError> {
+    fn render_image(&self, image: &ImageBuffer, scene: &graphics::Scene) -> Result<(), GpuError> {
         let command_buffer = image.command_buffer;
 
-        self.device
-            .wait_for_fences(&[self.control.fence], true, u64::MAX)?;
-        self.device.reset_fences(&[self.control.fence])?;
-        self.device.reset_command_buffer(
-            command_buffer,
-            vk::CommandBufferResetFlags::RELEASE_RESOURCES,
-        )?;
+        unsafe {
+            self.device
+                .wait_for_fences(&[self.control.fence], true, u64::MAX)?;
+            self.device.reset_fences(&[self.control.fence])?;
+            self.device.reset_command_buffer(
+                command_buffer,
+                vk::CommandBufferResetFlags::RELEASE_RESOURCES,
+            )?;
+        }
 
         self.copy_buffer_data(image, scene)?;
 
         let info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        self.device.begin_command_buffer(command_buffer, &info)?;
+        unsafe { self.device.begin_command_buffer(command_buffer, &info)? };
 
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
@@ -996,37 +1036,39 @@ impl Gpu {
             .render_area(self.display_dimensions.render_area())
             .clear_values(&clear_values);
 
-        self.device.cmd_begin_render_pass(
-            command_buffer,
-            &render_pass_begin,
-            vk::SubpassContents::INLINE,
-        );
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                command_buffer,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
 
-        self.device.cmd_bind_pipeline(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipeline.pipeline,
-        );
+            self.device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.pipeline,
+            );
 
-        self.device
-            .cmd_set_viewport(command_buffer, 0, &self.pipeline.viewports);
-        self.device
-            .cmd_set_scissor(command_buffer, 0, &self.pipeline.scissors);
-        self.device.cmd_bind_descriptor_sets(
-            command_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipeline.layout,
-            0,
-            &[image.param_buffer.descriptor_set],
-            &[0],
-        );
-        self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            self.device
+                .cmd_set_viewport(command_buffer, 0, &self.pipeline.viewports);
+            self.device
+                .cmd_set_scissor(command_buffer, 0, &self.pipeline.scissors);
+            self.device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline.layout,
+                0,
+                &[image.param_buffer.descriptor_set],
+                &[0],
+            );
+            self.device.cmd_draw(command_buffer, 3, 1, 0, 0);
 
-        self.save_last_frame(image);
+            self.save_last_frame(image);
 
-        self.device.cmd_end_render_pass(command_buffer);
+            self.device.cmd_end_render_pass(command_buffer);
 
-        self.device.end_command_buffer(command_buffer)?;
+            self.device.end_command_buffer(command_buffer)?;
+        }
 
         let wait_semaphores = [self.control.present_complete_semaphore];
         let signal_semaphores = [self.control.rendering_complete_semaphore];
@@ -1038,8 +1080,13 @@ impl Gpu {
             .command_buffers(&command_buffers)
             .wait_dst_stage_mask(&wait_dst_stage_mask);
 
-        self.device
-            .queue_submit(self.control.queue, &[queue_submit_info], self.control.fence)?;
+        unsafe {
+            self.device.queue_submit(
+                self.control.queue,
+                &[queue_submit_info],
+                self.control.fence,
+            )?
+        };
         Ok(())
     }
 
@@ -1105,17 +1152,19 @@ impl Drop for Gpu {
 }
 
 impl Control {
-    unsafe fn destroy(&self, device: &ash::Device) {
-        device.destroy_semaphore(self.rendering_complete_semaphore, None);
-        device.destroy_semaphore(self.present_complete_semaphore, None);
-        device.destroy_fence(self.fence, None);
-        device.destroy_command_pool(self.command_pool, None);
+    fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_semaphore(self.rendering_complete_semaphore, None);
+            device.destroy_semaphore(self.present_complete_semaphore, None);
+            device.destroy_fence(self.fence, None);
+            device.destroy_command_pool(self.command_pool, None);
+        }
     }
 }
 
 impl<T> Buffer<T> {
-    unsafe fn write(&self, device: &ash::Device, val: T) -> Result<(), vk::Result> {
-        self.mapped_memory.write(val);
+    fn write(&self, device: &ash::Device, val: T) -> Result<(), vk::Result> {
+        unsafe { self.mapped_memory.write(val) };
 
         if self.host_coherent {
             return Ok(());
@@ -1124,34 +1173,38 @@ impl<T> Buffer<T> {
             .memory(self.buffer_memory)
             .offset(0)
             .size(std::mem::size_of::<T>() as u64);
-        device.flush_mapped_memory_ranges(&[flush_memory_ranges])?;
+        unsafe { device.flush_mapped_memory_ranges(&[flush_memory_ranges])? };
         Ok(())
     }
 
-    unsafe fn destroy(&self, device: &ash::Device, descriptor_pool: vk::DescriptorPool) {
-        let _ = device.free_descriptor_sets(descriptor_pool, &[self.descriptor_set]);
-        device.unmap_memory(self.buffer_memory);
-        device.free_memory(self.buffer_memory, None);
-        device.destroy_buffer(self.buffer, None);
+    fn destroy(&self, device: &ash::Device, descriptor_pool: vk::DescriptorPool) {
+        unsafe {
+            let _ = device.free_descriptor_sets(descriptor_pool, &[self.descriptor_set]);
+            device.unmap_memory(self.buffer_memory);
+            device.free_memory(self.buffer_memory, None);
+            device.destroy_buffer(self.buffer, None);
+        }
     }
 }
 
 impl ImageBuffer {
-    unsafe fn destroy(
+    fn destroy(
         &self,
         device: &ash::Device,
         command_pool: vk::CommandPool,
         descriptor_pool: vk::DescriptorPool,
     ) {
-        self.param_buffer.destroy(device, descriptor_pool);
-        device.free_command_buffers(command_pool, &[self.command_buffer]);
-        device.destroy_framebuffer(self.framebuffer, None);
-        device.destroy_image_view(self.view, None);
+        unsafe {
+            self.param_buffer.destroy(device, descriptor_pool);
+            device.free_command_buffers(command_pool, &[self.command_buffer]);
+            device.destroy_framebuffer(self.framebuffer, None);
+            device.destroy_image_view(self.view, None);
+        }
     }
 }
 
 impl StorageImage {
-    unsafe fn add_to_descriptor_sets(&self, device: &ash::Device, images: &[ImageBuffer]) {
+    fn add_to_descriptor_sets(&self, device: &ash::Device, images: &[ImageBuffer]) {
         images.iter().for_each(|image_buffer| {
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(self.view)
@@ -1162,24 +1215,28 @@ impl StorageImage {
                 .dst_binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
                 .image_info(&image_infos);
-            device.update_descriptor_sets(&[write_image_info], &[]);
+            unsafe { device.update_descriptor_sets(&[write_image_info], &[]) };
         });
     }
 
-    unsafe fn destroy(&self, device: &ash::Device) {
-        device.destroy_image(self.image, None);
-        device.free_memory(self.buffer_memory, None);
-        device.destroy_image_view(self.view, None);
+    fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_image(self.image, None);
+            device.free_memory(self.buffer_memory, None);
+            device.destroy_image_view(self.view, None);
+        }
     }
 }
 
 impl Pipeline {
-    unsafe fn destroy(&self, device: &ash::Device) {
-        device.destroy_pipeline_layout(self.layout, None);
-        device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-        device.destroy_descriptor_pool(self.descriptor_pool, None);
-        device.destroy_shader_module(self.fragment_shader_module, None);
-        device.destroy_shader_module(self.vertex_shader_module, None);
+    fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_shader_module(self.fragment_shader_module, None);
+            device.destroy_shader_module(self.vertex_shader_module, None);
+        }
     }
 }
 

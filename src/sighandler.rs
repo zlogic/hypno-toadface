@@ -3,16 +3,18 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-pub unsafe fn listen_to_sigint() {
-    let mut new_action: libc::sigaction = mem::zeroed();
-    new_action.sa_sigaction = handle as usize;
-    new_action.sa_flags = libc::SA_SIGINFO;
+pub fn listen_to_sigint() {
+    unsafe {
+        let mut new_action: libc::sigaction = mem::zeroed();
+        new_action.sa_sigaction = handle as usize;
+        new_action.sa_flags = libc::SA_SIGINFO;
 
-    libc::sigaction(
-        libc::SIGINT,
-        &mut new_action as *mut libc::sigaction,
-        std::ptr::null_mut(),
-    );
+        libc::sigaction(
+            libc::SIGINT,
+            &mut new_action as *mut libc::sigaction,
+            std::ptr::null_mut(),
+        );
+    }
 }
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
