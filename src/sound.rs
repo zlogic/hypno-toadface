@@ -92,12 +92,12 @@ impl Device {
         unsafe {
             ioctl::ioctl(
                 &self.file,
-                ioctl::Updater::<alsa::IoCtlHwParams, alsa::Params>::new(&mut params),
+                ioctl::Updater::<{ alsa::IOC_HW_PARAMS }, alsa::Params>::new(&mut params),
             )?;
         }
 
         unsafe {
-            ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+            ioctl::ioctl(&self.file, ioctl::NoArg::<{ alsa::IOC_PREPARE }>::new())?;
         }
         Ok(())
     }
@@ -142,12 +142,12 @@ impl Device {
             unsafe {
                 match ioctl::ioctl(
                     &self.file,
-                    ioctl::Setter::<alsa::IoCtlWriteiFrames, _>::new(submit),
+                    ioctl::Setter::<{ alsa::IOC_WRITEI_FRAMES }, _>::new(submit),
                 ) {
                     Ok(()) => {}
                     Err(rustix::io::Errno::PIPE) => {
                         // Buffer underrun occurred, restart device.
-                        ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlPrepare>::new())?;
+                        ioctl::ioctl(&self.file, ioctl::NoArg::<{ alsa::IOC_PREPARE }>::new())?;
                     }
                     Err(rustix::io::Errno::INTR) => {
                         // If interrupted, nothing to do.
@@ -258,8 +258,8 @@ impl Drop for Player {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
-            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrain>::new());
-            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<alsa::IoCtlDrop>::new());
+            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<{ alsa::IOC_DRAIN }>::new());
+            let _ = ioctl::ioctl(&self.file, ioctl::NoArg::<{ alsa::IOC_DROP }>::new());
         }
     }
 }
@@ -377,11 +377,11 @@ mod alsa {
         }
     }
 
-    pub type IoCtlHwParams = ioctl::ReadWriteOpcode<b'A', 0x11, Params>;
-    pub type IoCtlPrepare = ioctl::NoneOpcode<b'A', 0x40, ()>;
-    pub type IoCtlDrop = ioctl::NoneOpcode<b'A', 0x43, ()>;
-    pub type IoCtlDrain = ioctl::NoneOpcode<b'A', 0x44, ()>;
-    pub type IoCtlWriteiFrames<'a> = ioctl::WriteOpcode<b'A', 0x50, SubmitBuffer>;
+    pub const IOC_HW_PARAMS: ioctl::Opcode = ioctl::opcode::read_write::<Params>(b'A', 0x11);
+    pub const IOC_PREPARE: ioctl::Opcode = ioctl::opcode::none(b'A', 0x40);
+    pub const IOC_DROP: ioctl::Opcode = ioctl::opcode::none(b'A', 0x43);
+    pub const IOC_DRAIN: ioctl::Opcode = ioctl::opcode::none(b'A', 0x44);
+    pub const IOC_WRITEI_FRAMES: ioctl::Opcode = ioctl::opcode::write::<SubmitBuffer>(b'A', 0x50);
 }
 
 #[derive(Debug)]
