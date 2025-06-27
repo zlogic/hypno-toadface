@@ -1314,17 +1314,17 @@ impl fmt::Display for GpuError {
         match *self {
             Self::Internal(ref msg) => f.write_str(msg),
             Self::Loading(ref e) => {
-                write!(f, "Failed to init GPU: {}", e)
+                write!(f, "Failed to init GPU: {e}")
             }
             Self::Vk(ref msg, ref e) => {
                 if !msg.is_empty() {
-                    write!(f, "Vulkan error: {} ({})", msg, e)
+                    write!(f, "Vulkan error: {msg} ({e})")
                 } else {
-                    write!(f, "Vulkan error: {}", e)
+                    write!(f, "Vulkan error: {e}")
                 }
             }
             Self::Io(ref e) => {
-                write!(f, "IO error: {}", e)
+                write!(f, "IO error: {e}")
             }
         }
     }

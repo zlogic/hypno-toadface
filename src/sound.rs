@@ -285,7 +285,7 @@ mod alsa {
     pub const SNDRV_PCM_HW_PARAM_FIRST_INTERVAL: usize = SNDRV_PCM_HW_PARAM_SAMPLE_BITS;
     pub const SNDRV_PCM_HW_PARAM_LAST_INTERVAL: usize = SNDRV_PCM_HW_PARAM_TICK_TIME;
 
-    type SoundMask = [u32; (256 + 31) / 32];
+    type SoundMask = [u32; 256_usize.div_ceil(32)];
 
     pub struct SoundInterval {
         pub min: u32,
@@ -395,13 +395,13 @@ impl fmt::Display for SoundError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             Self::Recv(ref e) => {
-                write!(f, "Receive error: {}", e)
+                write!(f, "Receive error: {e}")
             }
             Self::Io(ref e) => {
-                write!(f, "IO error: {}", e)
+                write!(f, "IO error: {e}")
             }
             Self::Ioctl(ref e) => {
-                write!(f, "IOCTL error: {}", e)
+                write!(f, "IOCTL error: {e}")
             }
         }
     }

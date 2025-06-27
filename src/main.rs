@@ -42,7 +42,7 @@ fn main() {
         if arg.starts_with("--") {
             // Option flags.
             if arg == "--help" {
-                println!("{}", USAGE_INSTRUCTIONS);
+                println!("{USAGE_INSTRUCTIONS}");
                 exit(0);
             }
             if arg == "--no-print-fps" {
@@ -56,16 +56,16 @@ fn main() {
             let (name, value) = if let Some(arg) = arg.split_once('=') {
                 arg
             } else {
-                eprintln!("Option flag {} has no value", arg);
-                println!("{}", USAGE_INSTRUCTIONS);
+                eprintln!("Option flag {arg} has no value");
+                println!("{USAGE_INSTRUCTIONS}");
                 exit(2);
             };
             if name == "--speed" {
                 match value.parse() {
                     Ok(speed) => args.speed = speed,
                     Err(err) => {
-                        eprintln!("Speed {} has an unsupported value {}: {}", name, value, err);
-                        println!("{}", USAGE_INSTRUCTIONS);
+                        eprintln!("Speed {name} has an unsupported value {value}: {err}");
+                        println!("{USAGE_INSTRUCTIONS}");
                         exit(2)
                     }
                 };
@@ -74,7 +74,7 @@ fn main() {
             } else if name == "--sound" {
                 args.sound_device = Some(value.to_string());
             } else {
-                eprintln!("Unsupported argument {}", arg);
+                eprintln!("Unsupported argument {arg}");
             }
         }
     }
@@ -95,8 +95,8 @@ fn run_animation(args: Args) {
             match load_file(&shader_filename) {
                 Ok(shader_data) => Some(shader_data),
                 Err(err) => {
-                    eprintln!("Failed to load shader file {}: {}", shader_filename, err);
-                    println!("{}", USAGE_INSTRUCTIONS);
+                    eprintln!("Failed to load shader file {shader_filename}: {err}");
+                    println!("{USAGE_INSTRUCTIONS}");
                     exit(2)
                 }
             }
@@ -131,7 +131,7 @@ fn run_animation(args: Args) {
         let result = match renderer.render(&scene) {
             Ok(res) => res,
             Err(err) => {
-                eprintln!("Failed to render scene: {}", err);
+                eprintln!("Failed to render scene: {err}");
                 continue;
             }
         };
@@ -148,7 +148,7 @@ fn run_animation(args: Args) {
             let elapsed = framecounter_start.elapsed();
             let fps = framecounter_frames as f32 / elapsed.as_secs_f32();
 
-            print!("Average FPS: {:.2}   \r", fps);
+            print!("Average FPS: {fps:.2}   \r");
             let _ = io::stdout().flush();
 
             framecounter_frames = 0;
