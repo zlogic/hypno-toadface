@@ -1293,10 +1293,10 @@ where
     F: FnOnce(T),
 {
     fn drop(&mut self) {
-        if let Some(val) = self.val.take() {
-            if let Some(rb) = self.rollback.take() {
-                rb(val)
-            }
+        if let Some(val) = self.val.take()
+            && let Some(rb) = self.rollback.take()
+        {
+            rb(val)
         }
     }
 }
