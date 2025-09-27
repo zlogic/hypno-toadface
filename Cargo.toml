@@ -11,7 +11,7 @@ rust-version = "1.89"
 
 [dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
-rustix = { version = "1.0", default-features = false, features = ["std", "use-libc-auxv"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "use-libc-auxv"] }
 rand = { version = "0.9", default-features = false, features = ["std", "std_rng", "thread_rng"] }
 libc = { version = "*" }
 
