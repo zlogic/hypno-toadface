@@ -21,7 +21,7 @@ This works well on an off-brand digital signage appliance (NUC) with a Celeron C
 Build and run as a regular Rust project:
 
 ```shell
-./hypno-toadface [--speed=<speed>] [--shader-file=<filename>] [--sound=<devicepath>] [--no-print-fps] [--keep-last-frame]
+./hypno-toadface [--speed=<speed>] [--shader-file=<filename>] [--sound=<devicepath>] [--no-print-fps] [--keep-last-frame] [--max-resolution=<WxH>]
 ```
 
 `--speed=<speed>` is an optional argument to specify how fast the animation should be playing, for example `--speed=0.1`. The default speed is 0.04. Negative values make the animation run in reverse.
@@ -33,6 +33,8 @@ Build and run as a regular Rust project:
 `--no-print-fps` turns off printing the FPS counter.
 
 `--keep-last-frame` saves the last frame and binds it as a texture (`layout (binding = 1) uniform sampler2D previousImage;`). It can be accessed as `texture(previousImage, coord)` in a shader. As this has a performance impact, this feature is disabled by default.
+
+`--max-resolution=<WxH>` will limit the maximum display resolution, for example `--max-resolution=1920x1080`. This improves performance on low-power GPUs (such as Intel HD Graphics 500) and reduces memory usage.
 
 ⚠️ This project works without a windowing manager, but in Linux only one device can have exclusive access to the GPU. If X or Wayland is running, using the GPU would be impossible. To run this project, stop any windowing managers.
 

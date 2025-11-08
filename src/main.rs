@@ -19,6 +19,7 @@ pub struct Args {
     shader_filename: Option<String>,
     no_print_fps: bool,
     keep_last_frame: bool,
+    max_resolution: Option<(u32, u32)>,
     sound_device: Option<String>,
 }
 
@@ -28,6 +29,7 @@ Options:\
 \n      --shader-file=<FILENAME> Filename for custom SPIR-V frag shader [default: uses built-in]\
 \n      --no-print-fps           If specified, don't print FPS counter\
 \n      --keep-last-frame        If specified, save last frame and provide it to the shader\
+\n      --max-resolution=<WxH>   If specified, choose a resolution that doesn't exceed WxH\
 \n      --help                   Print help";
 
 fn main() {
@@ -36,6 +38,7 @@ fn main() {
         shader_filename: None,
         no_print_fps: false,
         keep_last_frame: false,
+        max_resolution: None,
         sound_device: None,
     };
     for arg in env::args().skip(1) {
@@ -71,6 +74,43 @@ fn main() {
                 };
             } else if name == "--shader-file" {
                 args.shader_filename = Some(value.to_string());
+            } else if name == "--max-resolution" {
+                match value
+                    .to_lowercase()
+                    .split("x")
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    [width, height] => match (width.parse(), height.parse()) {
+                        (Ok(width), Ok(height)) => args.max_resolution = Some((width, height)),
+                        (Err(err), Ok(_)) => {
+                            eprintln!(
+                                "Max resolution {name} has an unsupported width format {width}: {err}"
+                            );
+                            println!("{USAGE_INSTRUCTIONS}");
+                            exit(2)
+                        }
+                        (Ok(_), Err(err)) => {
+                            eprintln!(
+                                "Max resolution {name} has an unsupported height format {height}: {err}"
+                            );
+                            println!("{USAGE_INSTRUCTIONS}");
+                            exit(2)
+                        }
+                        (Err(err_width), Err(err_height)) => {
+                            eprintln!(
+                                "Max resolution {name} has an unsupported width format {width}: {err_width} and an unsupported height format {height}: {err_height}"
+                            );
+                            println!("{USAGE_INSTRUCTIONS}");
+                            exit(2)
+                        }
+                    },
+                    _ => {
+                        eprintln!("Max resolution {name} has an unsupported value format {value}");
+                        println!("{USAGE_INSTRUCTIONS}");
+                        exit(2)
+                    }
+                }
             } else if name == "--sound" {
                 args.sound_device = Some(value.to_string());
             } else {
@@ -107,6 +147,7 @@ fn run_animation(args: Args) {
         let conf = gpu::Configuration {
             shader: shader_data.as_deref(),
             store_image: args.keep_last_frame,
+            max_resolution: args.max_resolution,
         };
         gpu::Gpu::init(conf).expect("Failed to init GPU")
     };

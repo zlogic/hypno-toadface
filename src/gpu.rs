@@ -97,6 +97,7 @@ where
 pub struct Configuration<'a> {
     pub shader: Option<&'a [u8]>,
     pub store_image: bool,
+    pub max_resolution: Option<(u32, u32)>,
 }
 
 impl Gpu {
@@ -114,7 +115,7 @@ impl Gpu {
 
             let (physical_device, device_name, graphics_queue) = Self::find_device(&instance)?;
             let (surface, display_dimensions, display_name) =
-                Self::create_display(&display_loader, physical_device)?;
+                Self::create_display(&display_loader, physical_device, conf.max_resolution)?;
             let surface = ScopeRollback::new(surface, |surface| {
                 surface_loader.destroy_surface(surface, None)
             });
@@ -293,6 +294,7 @@ impl Gpu {
     fn create_display(
         display_loader: &khr::display::Instance,
         physical_device: vk::PhysicalDevice,
+        max_resolution: Option<(u32, u32)>,
     ) -> Result<(vk::SurfaceKHR, DisplayDimensions, String), GpuError> {
         let displays =
             unsafe { display_loader.get_physical_device_display_properties(physical_device)? };
@@ -301,7 +303,17 @@ impl Gpu {
         let display_modes = unsafe {
             display_loader.get_display_mode_properties(physical_device, display.display)?
         };
-        let display_mode = display_modes.first().ok_or("No display modes found")?;
+        let display_mode = display_modes
+            .iter()
+            .find(|mode| {
+                if let Some((max_width, max_height)) = max_resolution {
+                    mode.parameters.visible_region.width <= max_width
+                        && mode.parameters.visible_region.height <= max_height
+                } else {
+                    true
+                }
+            })
+            .ok_or("No display modes found")?;
 
         let display_planes = unsafe {
             display_loader.get_physical_device_display_plane_properties(physical_device)?
