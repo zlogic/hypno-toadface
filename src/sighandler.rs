@@ -6,7 +6,7 @@ use std::{
 pub fn listen_to_sigint() {
     unsafe {
         let mut new_action: libc::sigaction = mem::zeroed();
-        new_action.sa_sigaction = handle as usize;
+        new_action.sa_sigaction = handle as *const () as usize;
         new_action.sa_flags = libc::SA_SIGINFO;
 
         libc::sigaction(
