@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use rand::Rng as _;
+use rand::RngExt as _;
 
 use rustix::ioctl;
 
