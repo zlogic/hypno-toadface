@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: true
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Get current Rust version
       id: get-rust-version
@@ -20,7 +20,7 @@ jobs:
 
     - name: Cache Rust dependencies and artifacts
       id: cache-rust
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry/index
@@ -46,7 +46,7 @@ jobs:
           os: ubuntu
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Get current Rust version
       id: get-rust-version
@@ -54,7 +54,7 @@ jobs:
 
     - name: Cache Rust dependencies and artifacts
       id: cache-rust
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry/index
@@ -83,7 +83,7 @@ jobs:
       run: tar -cvjf hypno-toadface-${{ matrix.os }}-${{ matrix.arch }}.tar.bz2 -C target/${{ matrix.arch }}-unknown-linux-gnu/release hypno-toadface
 
     - name: Upload application
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: hypno-toadface-${{ matrix.os }}-${{ matrix.arch }}
         path: hypno-toadface-*.tar.bz2
@@ -93,7 +93,7 @@ jobs:
     needs: [ "build-linux" ]
     steps:
       - name: Merge all applications
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@v7
         with:
           name: hypno-toadface-all
           pattern: hypno-toadface-*
