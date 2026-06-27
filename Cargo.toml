@@ -2,7 +2,7 @@
 name = "hypno-toadface"
 version = "0.0.8"
 edition = "2024"
-authors = ["Dmitry Zolotukhin <zlogic@gmail.com>"]
+authors = ["Dmitrii Zolotukhin <contact@3d-net.nl>"]
 repository = "https://github.com/zlogic/hypno-toadface"
 license = "Apache-2.0"
 rust-version = "1.89"
